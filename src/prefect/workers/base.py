@@ -16,6 +16,8 @@ from typing import (
     Optional,
     Type,
 )
+from collections import defaultdict
+import os
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -506,6 +508,10 @@ class BaseWorker(abc.ABC, Generic[C, V, R]):
         self._cancelling_flow_run_ids: set[UUID] = set()
         self._scheduled_task_scopes: set[anyio.CancelScope] = set()
         self._worker_metadata_sent = False
+        
+        # Track repeated aborts per flow run
+        self._abort_counts = defaultdict(int)
+        self._abort_threshold = int(os.getenv("PREFECT_WORKER_ABORT_THRESHOLD", "3"))
 
     @property
     def client(self) -> PrefectClient:
