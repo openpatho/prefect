@@ -1401,6 +1401,23 @@ class BaseWorker(abc.ABC, Generic[C, V, R]):
                     f"Server sent an abort signal: {exc}"
                 ),
             )
+            # Track number of times this flow run has been aborted
+            self._abort_counts[flow_run.id] += 1
+            count = self._abort_counts[flow_run.id]
+    
+            if count >= self._abort_threshold:
+                run_logger.error(
+                    f"Flow run '{flow_run.id}' aborted {count} times. "
+                    f"Marking as failed to avoid infinite loop."
+                )
+                await self.client.set_flow_run_state(
+                    flow_run_id=flow_run.id,
+                    state=Failed(message="Auto-failed after repeated aborts (loop protection)"),
+                )
+            else:
+                run_logger.info(
+                    f"Abort count for flow run '{flow_run.id}': {count}/{self._abort_threshold}"
+                )
 
             return False
         except Exception:
