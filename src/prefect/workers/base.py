@@ -510,8 +510,8 @@ class BaseWorker(abc.ABC, Generic[C, V, R]):
         self._worker_metadata_sent = False
         
         # Track repeated aborts per flow run
-        self._abort_counts = defaultdict(int)
-        self._abort_threshold = int(os.getenv("PREFECT_WORKER_ABORT_THRESHOLD", "3"))
+        #self._abort_counts = defaultdict(int)
+        #self._abort_threshold = int(os.getenv("PREFECT_WORKER_ABORT_THRESHOLD", "3"))
 
     @property
     def client(self) -> PrefectClient:
