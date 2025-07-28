@@ -4,8 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefect"
-#dynamic = ["version"]
-version="3.4.10+opdev"
+dynamic = ["version"]
 description = "Workflow orchestration and management."
 readme = "README.md"
 requires-python = ">=3.9,<3.14"
