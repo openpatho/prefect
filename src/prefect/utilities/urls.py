@@ -2,6 +2,7 @@ import inspect
 import ipaddress
 import socket
 import urllib.parse
+import re
 from logging import Logger
 from string import Formatter
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
@@ -21,6 +22,31 @@ if TYPE_CHECKING:
     from prefect.variables import Variable
 
 logger: Logger = get_logger("utilities.urls")
+
+# Regular expression patterns used for credential redaction
+_URL_WITH_CREDENTIALS = re.compile(r"(https?://)[^:@\s]+:[^@/\s]+@")
+_URL_WITH_TOKEN = re.compile(r"(https?://)[^:@/\s]+@")
+
+
+def redact_url_credentials(text: str) -> str:
+    """Redact embedded credentials from URLs in a string.
+
+    This replaces any occurrences of ``https://user:token@host`` with
+    ``https://***:***@host`` and ``https://token@host`` with ``https://***@host``.
+
+    Args:
+        text: A string that may contain URLs with credentials.
+
+    Returns:
+        The string with any credentials redacted.
+    """
+
+    if not text:
+        return text
+
+    text = _URL_WITH_CREDENTIALS.sub(r"\1***:***@", text)
+    text = _URL_WITH_TOKEN.sub(r"\1***@", text)
+    return text
 
 # The following objects are excluded from UI URL generation because we lack a
 # directly-addressable URL:

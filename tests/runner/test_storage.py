@@ -1,5 +1,6 @@
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 from typing import Optional
@@ -791,6 +792,33 @@ class TestGitRepository:
 
         mock_run_process.assert_has_awaits(expected_calls)
         assert mock_run_process.await_args_list == expected_calls
+
+    async def test_pull_code_logs_redacted_error(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        repo = GitRepository(url="https://github.com/org/repo.git")
+        repo.set_base_path(tmp_path)
+        (repo.destination / ".git").mkdir(parents=True)
+
+        success = MagicMock()
+        success.stdout = repo._url.encode()
+        error = subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["git", "pull"],
+            stderr=b"fatal: https://oauth2:secret@github.com/org/repo.git",
+        )
+
+        run_process_mock = AsyncMock(side_effect=[success, error])
+        monkeypatch.setattr("prefect.runner.storage.run_process", run_process_mock)
+        clone_mock = AsyncMock()
+        monkeypatch.setattr(GitRepository, "_clone_repo", clone_mock)
+
+        with caplog.at_level("ERROR"):
+            await repo.pull_code()
+
+        clone_mock.assert_awaited_once()
+        assert any("https://***:***@github.com" in r.message for r in caplog.records)
+        assert any("fatal:" in r.message for r in caplog.records)
 
 
 class TestRemoteStorage:
