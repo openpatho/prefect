@@ -324,7 +324,11 @@ class GitRepository:
                     if stderr:
                         message += f": {stderr}"
                     self._logger.error(message)
-                    shutil.rmtree(self.destination)
+                    try:
+                        #this rmtree sometimes fails if git failed catastrophically with no files moved
+                        shutil.rmtree(self.destination)
+                    except:
+                        pass
                     await self._clone_repo()
 
                 await run_process(
@@ -358,7 +362,11 @@ class GitRepository:
                     if stderr:
                         message += f": {stderr}"
                     self._logger.error(message)
-                    shutil.rmtree(self.destination)
+                    try:
+                        #this rmtree sometimes fails if git failed catastrophically with no files moved
+                        shutil.rmtree(self.destination)
+                    except:
+                        pass
                     await self._clone_repo()
 
         else:
