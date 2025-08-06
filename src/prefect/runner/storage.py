@@ -25,6 +25,7 @@ from prefect.blocks.system import Secret
 from prefect.filesystems import ReadableDeploymentStorage, WritableDeploymentStorage
 from prefect.logging.loggers import get_logger
 from prefect.utilities.collections import visit_collection
+from prefect.utilities.urls import redact_url_credentials
 
 
 @runtime_checkable
@@ -312,9 +313,17 @@ class GitRepository:
                     await run_process(cmd, cwd=self.destination)
                     self._logger.debug("Successfully fetched latest changes")
                 except subprocess.CalledProcessError as exc:
-                    self._logger.error(
-                        f"Failed to fetch latest changes with exit code {exc}"
+                    stderr = (
+                        redact_url_credentials(exc.stderr.decode().strip())
+                        if exc.stderr
+                        else ""
                     )
+                    message = (
+                        f"Failed to fetch latest changes with exit code {exc.returncode}"
+                    )
+                    if stderr:
+                        message += f": {stderr}"
+                    self._logger.error(message)
                     shutil.rmtree(self.destination)
                     await self._clone_repo()
 
@@ -338,9 +347,17 @@ class GitRepository:
                     await run_process(cmd, cwd=self.destination)
                     self._logger.debug("Successfully pulled latest changes")
                 except subprocess.CalledProcessError as exc:
-                    self._logger.error(
-                        f"Failed to pull latest changes with exit code {exc}"
+                    stderr = (
+                        redact_url_credentials(exc.stderr.decode().strip())
+                        if exc.stderr
+                        else ""
                     )
+                    message = (
+                        f"Failed to pull latest changes with exit code {exc.returncode}"
+                    )
+                    if stderr:
+                        message += f": {stderr}"
+                    self._logger.error(message)
                     shutil.rmtree(self.destination)
                     await self._clone_repo()
 
@@ -385,10 +402,17 @@ class GitRepository:
         except subprocess.CalledProcessError as exc:
             # Hide the command used to avoid leaking the access token
             exc_chain = None if self._credentials else exc
-            raise RuntimeError(
-                f"Failed to clone repository {self._url!r} with exit code"
-                f" {exc.returncode}."
-            ) from exc_chain
+            stderr = (
+                redact_url_credentials(exc.stderr.decode().strip())
+                if exc.stderr
+                else ""
+            )
+            message = (
+                f"Failed to clone repository {self._url!r} with exit code {exc.returncode}"
+            )
+            if stderr:
+                message += f": {stderr}"
+            raise RuntimeError(message) from exc_chain
 
         if self._commit_sha:
             # Fetch the commit

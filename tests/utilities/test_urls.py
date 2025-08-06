@@ -14,7 +14,11 @@ from prefect.server.schemas.states import State
 from prefect.settings import PREFECT_API_URL, PREFECT_UI_URL, temporary_settings
 from prefect.states import StateType
 from prefect.types._datetime import now
-from prefect.utilities.urls import url_for, validate_restricted_url
+from prefect.utilities.urls import (
+    redact_url_credentials,
+    url_for,
+    validate_restricted_url,
+)
 from prefect.variables import Variable
 
 MOCK_PREFECT_UI_URL = "https://ui.prefect.io"
@@ -415,3 +419,22 @@ def test_url_for_with_additional_format_kwargs_raises_if_placeholder_not_replace
         match="Unable to generate URL for worker because the following keys are missing: work_pool_name",
     ):
         url_for(obj="worker", obj_id="123e4567-e89b-12d3-a456-42661417400")
+
+
+def test_redact_url_credentials_with_user_and_token():
+    text = (
+        "fatal: could not read https://oauth2:secret@github.com/org/repo.git"
+    )
+    redacted = redact_url_credentials(text)
+    assert "secret" not in redacted
+    assert "oauth2" not in redacted
+    assert (
+        "https://***:***@github.com/org/repo.git" in redacted
+    )
+
+
+def test_redact_url_credentials_with_token_only():
+    text = "error: unable to access 'https://secret@github.com/org/repo.git'"
+    redacted = redact_url_credentials(text)
+    assert "secret" not in redacted
+    assert "https://***@github.com/org/repo.git" in redacted
