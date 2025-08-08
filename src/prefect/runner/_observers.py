@@ -6,6 +6,7 @@ from typing import Any, Protocol
 from prefect.events.clients import PrefectEventSubscriber, get_events_subscriber
 from prefect.events.filters import EventFilter, EventNameFilter
 from prefect.logging.loggers import get_logger
+from websockets.exceptions import ConnectionClosedError
 
 
 class OnCancellingCallback(Protocol):
@@ -24,19 +25,22 @@ class FlowRunCancellingObserver:
             raise RuntimeError(
                 "Events subscriber not initialized. Please use `async with` to initialize the observer."
             )
-        async for event in self._events_subscriber:
-            try:
-                flow_run_id = uuid.UUID(
-                    event.resource["prefect.resource.id"].replace(
-                        "prefect.flow-run.", ""
+        try:
+            async for event in self._events_subscriber:
+                try:
+                    flow_run_id = uuid.UUID(
+                        event.resource["prefect.resource.id"].replace(
+                            "prefect.flow-run.", "",
+                        )
                     )
-                )
-                self.on_cancelling(flow_run_id)
-            except ValueError:
-                self.logger.debug(
-                    "Received event with invalid flow run ID: %s",
-                    event.resource["prefect.resource.id"],
-                )
+                    self.on_cancelling(flow_run_id)
+                except ValueError:
+                    self.logger.debug(
+                        "Received event with invalid flow run ID: %s",
+                        event.resource["prefect.resource.id"],
+                    )
+        except ConnectionClosedError:
+            self.logger.debug("Events subscriber connection closed")
 
     async def __aenter__(self):
         self._events_subscriber = await self._exit_stack.enter_async_context(
@@ -58,3 +62,4 @@ class FlowRunCancellingObserver:
             pass
         except Exception:
             self.logger.exception("Error consuming events")
+
