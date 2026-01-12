@@ -69,7 +69,11 @@ from prefect._internal.schemas.validators import (
 from prefect._versioning import VersionType, get_inferred_version_info
 from prefect.client.base import ServerType
 from prefect.client.orchestration import PrefectClient, get_client
-from prefect.client.schemas.actions import DeploymentScheduleCreate, DeploymentUpdate
+from prefect.client.schemas.actions import (
+    DeploymentScheduleCreate,
+    DeploymentScheduleUpdate,
+    DeploymentUpdate,
+)
 from prefect.client.schemas.filters import WorkerFilter, WorkerFilterStatus
 from prefect.client.schemas.objects import (
     ConcurrencyLimitConfig,
@@ -110,6 +114,33 @@ if TYPE_CHECKING:
     from prefect.flows import Flow
 
 __all__ = ["RunnerDeployment"]
+
+
+def _extract_concurrency_options(
+    concurrency_limit: Union[int, ConcurrencyLimitConfig, None],
+) -> tuple[Optional[int], Optional[dict[str, Any]]]:
+    """
+    Extract concurrency limit and options from a ConcurrencyLimitConfig or int.
+
+    Args:
+        concurrency_limit: Either an int (just the limit), a ConcurrencyLimitConfig
+            (with limit, collision_strategy, and optional grace_period_seconds),
+            or None.
+
+    Returns:
+        A tuple of (limit, concurrency_options_dict) where concurrency_options_dict
+        is None if concurrency_limit is not a ConcurrencyLimitConfig.
+    """
+    if isinstance(concurrency_limit, ConcurrencyLimitConfig):
+        concurrency_options: dict[str, Any] = {
+            "collision_strategy": concurrency_limit.collision_strategy
+        }
+        if concurrency_limit.grace_period_seconds is not None:
+            concurrency_options["grace_period_seconds"] = (
+                concurrency_limit.grace_period_seconds
+            )
+        return concurrency_limit.limit, concurrency_options
+    return concurrency_limit, None
 
 
 class DeploymentApplyError(RuntimeError):
@@ -174,7 +205,9 @@ class RunnerDeployment(BaseModel):
         default_factory=list,
         description="One of more tags to apply to this deployment.",
     )
-    schedules: Optional[List[DeploymentScheduleCreate]] = Field(
+    schedules: Optional[
+        List[Union[DeploymentScheduleCreate, DeploymentScheduleUpdate]]
+    ] = Field(
         default=None,
         description="The schedules that should cause this deployment to run.",
     )
@@ -434,6 +467,12 @@ class RunnerDeployment(BaseModel):
         else:
             update_payload["pull_steps"] = None
 
+        if self.schedules:
+            update_payload["schedules"] = [
+                schedule.model_dump(mode="json", exclude_unset=True)
+                for schedule in self.schedules
+            ]
+
         await client.update_deployment(
             deployment_id,
             deployment=DeploymentUpdate(
@@ -480,6 +519,7 @@ class RunnerDeployment(BaseModel):
     @sync_compatible
     async def apply(
         self,
+        schedules: Optional[List[dict[str, Any]]] = None,
         work_pool_name: Optional[str] = None,
         image: Optional[str] = None,
         version_info: Optional[VersionInfo] = None,
@@ -506,12 +546,20 @@ class RunnerDeployment(BaseModel):
             try:
                 deployment = await client.read_deployment_by_name(self.full_name)
             except ObjectNotFound:
+                if schedules:
+                    self.schedules = [
+                        DeploymentScheduleCreate(**schedule) for schedule in schedules
+                    ]
                 return await self._create(work_pool_name, image, version_info)
             else:
                 if image:
                     self.job_variables["image"] = image
                 if work_pool_name:
                     self.work_pool_name = work_pool_name
+                if schedules:
+                    self.schedules = [
+                        DeploymentScheduleUpdate(**schedule) for schedule in schedules
+                    ]
                 return await self._update(deployment.id, client, version_info)
 
     async def _create_slas(self, deployment_id: UUID, client: PrefectClient):
@@ -687,13 +735,9 @@ class RunnerDeployment(BaseModel):
 
         job_variables = job_variables or {}
 
-        if isinstance(concurrency_limit, ConcurrencyLimitConfig):
-            concurrency_options = {
-                "collision_strategy": concurrency_limit.collision_strategy
-            }
-            concurrency_limit = concurrency_limit.limit
-        else:
-            concurrency_options = None
+        concurrency_limit, concurrency_options = _extract_concurrency_options(
+            concurrency_limit
+        )
 
         deployment = cls(
             name=name,
@@ -831,16 +875,12 @@ class RunnerDeployment(BaseModel):
             schedule=schedule,
         )
 
-        if isinstance(concurrency_limit, ConcurrencyLimitConfig):
-            concurrency_options = {
-                "collision_strategy": concurrency_limit.collision_strategy
-            }
-            concurrency_limit = concurrency_limit.limit
-        else:
-            concurrency_options = None
+        concurrency_limit, concurrency_options = _extract_concurrency_options(
+            concurrency_limit
+        )
 
         deployment = cls(
-            name=Path(name).stem,
+            name=name,
             flow_name=flow_name or flow.name,
             schedules=constructed_schedules,
             concurrency_limit=concurrency_limit,
@@ -941,13 +981,9 @@ class RunnerDeployment(BaseModel):
             schedule=schedule,
         )
 
-        if isinstance(concurrency_limit, ConcurrencyLimitConfig):
-            concurrency_options = {
-                "collision_strategy": concurrency_limit.collision_strategy
-            }
-            concurrency_limit = concurrency_limit.limit
-        else:
-            concurrency_options = None
+        concurrency_limit, concurrency_options = _extract_concurrency_options(
+            concurrency_limit
+        )
 
         job_variables = job_variables or {}
 
@@ -961,7 +997,7 @@ class RunnerDeployment(BaseModel):
             )
 
         deployment = cls(
-            name=Path(name).stem,
+            name=name,
             flow_name=flow_name or flow.name,
             schedules=constructed_schedules,
             concurrency_limit=concurrency_limit,
@@ -1067,13 +1103,9 @@ class RunnerDeployment(BaseModel):
             schedule=schedule,
         )
 
-        if isinstance(concurrency_limit, ConcurrencyLimitConfig):
-            concurrency_options = {
-                "collision_strategy": concurrency_limit.collision_strategy
-            }
-            concurrency_limit = concurrency_limit.limit
-        else:
-            concurrency_options = None
+        concurrency_limit, concurrency_options = _extract_concurrency_options(
+            concurrency_limit
+        )
 
         job_variables = job_variables or {}
 
@@ -1085,7 +1117,7 @@ class RunnerDeployment(BaseModel):
             flow = load_flow_from_entrypoint(full_entrypoint)
 
         deployment = cls(
-            name=Path(name).stem,
+            name=name,
             flow_name=flow_name or flow.name,
             schedules=constructed_schedules,
             concurrency_limit=concurrency_limit,

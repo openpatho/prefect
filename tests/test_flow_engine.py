@@ -6,14 +6,14 @@ import uuid
 from textwrap import dedent
 from typing import Literal, Optional
 from unittest import mock
-from unittest.mock import MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 from uuid import UUID
 
 import anyio
 import pydantic
 import pytest
 
-from prefect import Flow, __development_base_path__, flow, task
+from prefect import Flow, __development_base_path__, flow, states, task
 from prefect.client.orchestration import PrefectClient, SyncPrefectClient, get_client
 from prefect.client.schemas.filters import FlowFilter, FlowFilterName, FlowRunFilter
 from prefect.client.schemas.objects import StateType
@@ -48,8 +48,8 @@ from prefect.input.run_input import RunInput
 from prefect.logging import get_run_logger
 from prefect.server.schemas.core import ConcurrencyLimitV2
 from prefect.server.schemas.core import FlowRun as ServerFlowRun
-from prefect.testing.utilities import AsyncMock
 from prefect.utilities.callables import get_call_parameters
+from prefect.utilities.engine import propose_state
 from prefect.utilities.filesystem import tmpchdir
 
 
@@ -999,20 +999,221 @@ class TestFlowCrashDetection:
         with pytest.raises(CrashedRun, match="Execution was aborted"):
             await flow_run.state.result()
 
+    async def test_base_exception_after_user_code_finishes_does_not_crash_sync(
+        self, prefect_client, monkeypatch, caplog
+    ):
+        """
+        Test that a BaseException raised after user code finishes executing
+        does not crash the flow run (sync flow).
+        """
+
+        @flow
+        def my_flow():
+            return 42
+
+        # Mock the flow run engine to raise a BaseException after handle_success
+        original_handle_success = FlowRunEngine.handle_success
+
+        def handle_success_with_exception(self, result):
+            original_handle_success(self, result)
+            # At this point the flow run state is final (Completed)
+            raise BaseException("Post-execution error")
+
+        monkeypatch.setattr(
+            FlowRunEngine, "handle_success", handle_success_with_exception
+        )
+
+        # The flow should complete successfully and return the result
+        result = my_flow()
+        assert result == 42
+
+        flow_runs = await prefect_client.read_flow_runs()
+        assert len(flow_runs) == 1
+        flow_run = flow_runs[0]
+        # The flow run should be completed, not crashed
+        assert flow_run.state.is_completed()
+        assert not flow_run.state.is_crashed()
+        # Verify the debug log message was recorded
+        assert (
+            "BaseException was raised after user code finished executing" in caplog.text
+        )
+
+    async def test_base_exception_after_user_code_finishes_does_not_crash_async(
+        self, prefect_client, monkeypatch, caplog
+    ):
+        """
+        Test that a BaseException raised after user code finishes executing
+        does not crash the flow run (async flow).
+        """
+
+        @flow
+        async def my_flow():
+            return 42
+
+        # Mock the flow run engine to raise a BaseException after handle_success
+        original_handle_success = AsyncFlowRunEngine.handle_success
+
+        async def handle_success_with_exception(self, result):
+            await original_handle_success(self, result)
+            # At this point the flow run state is final (Completed)
+            raise BaseException("Post-execution error")
+
+        monkeypatch.setattr(
+            AsyncFlowRunEngine, "handle_success", handle_success_with_exception
+        )
+
+        # The flow should complete successfully and return the result
+        result = await my_flow()
+        assert result == 42
+
+        flow_runs = await prefect_client.read_flow_runs()
+        assert len(flow_runs) == 1
+        flow_run = flow_runs[0]
+        # The flow run should be completed, not crashed
+        assert flow_run.state.is_completed()
+        assert not flow_run.state.is_crashed()
+        # Verify the debug log message was recorded
+        assert (
+            "BaseException was raised after user code finished executing" in caplog.text
+        )
+
+    async def test_base_exception_before_user_code_finishes_crashes_sync(
+        self, prefect_client, monkeypatch
+    ):
+        """
+        Test that a BaseException raised before user code finishes executing
+        still crashes the flow run (sync flow).
+        """
+
+        @flow
+        def my_flow():
+            return 42
+
+        # Mock the flow run engine to raise a BaseException during begin_run
+        monkeypatch.setattr(
+            FlowRunEngine,
+            "begin_run",
+            MagicMock(side_effect=BaseException("Pre-execution error")),
+        )
+
+        with pytest.raises(BaseException, match="Pre-execution error"):
+            my_flow()
+
+        flow_runs = await prefect_client.read_flow_runs()
+        assert len(flow_runs) == 1
+        flow_run = flow_runs[0]
+        # The flow run should be crashed
+        assert flow_run.state.is_crashed()
+
+    async def test_base_exception_before_user_code_finishes_crashes_async(
+        self, prefect_client, monkeypatch
+    ):
+        """
+        Test that a BaseException raised before user code finishes executing
+        still crashes the flow run (async flow).
+        """
+
+        @flow
+        async def my_flow():
+            return 42
+
+        # Mock the flow run engine to raise a BaseException during begin_run
+        async def begin_run_with_exception(self):
+            raise BaseException("Pre-execution error")
+
+        monkeypatch.setattr(AsyncFlowRunEngine, "begin_run", begin_run_with_exception)
+
+        with pytest.raises(BaseException, match="Pre-execution error"):
+            await my_flow()
+
+        flow_runs = await prefect_client.read_flow_runs()
+        assert len(flow_runs) == 1
+        flow_run = flow_runs[0]
+        # The flow run should be crashed
+        assert flow_run.state.is_crashed()
+
 
 class TestPauseFlowRun:
-    async def test_tasks_cannot_be_paused(self):
+    async def test_pause_flow_run_from_task_pauses_parent_flow(
+        self, prefect_client, events_pipeline
+    ):
+        """Test that calling pause_flow_run from within a task pauses the parent flow."""
+
         @task
-        async def the_little_task_that_pauses():
-            await pause_flow_run()
+        async def task_that_pauses():
+            await pause_flow_run(timeout=0.1)
             return True
 
         @flow
-        async def the_mountain():
-            return await the_little_task_that_pauses()
+        async def flow_with_pausing_task():
+            return await task_that_pauses()
 
-        with pytest.raises(RuntimeError, match="Cannot pause task runs.*"):
-            await the_mountain()
+        # The flow should timeout because it gets paused and never resumed
+        with pytest.raises(FlowPauseTimeout):
+            await flow_with_pausing_task()
+
+        # Verify the flow run was actually paused
+        flow_runs = await prefect_client.read_flow_runs()
+        assert len(flow_runs) >= 1
+        # The most recent flow run should have been paused
+        flow_run = flow_runs[0]
+        assert flow_run.state.is_paused() or flow_run.state.is_failed()
+
+    async def test_pause_flow_run_from_task_with_input(self, prefect_client):
+        """Test that pause_flow_run from within a task can receive input and resume."""
+        flow_run_id = None
+
+        class ApprovalInput(RunInput):
+            approved: bool
+
+        @task
+        async def get_approval():
+            approval = await pause_flow_run(
+                timeout=10, poll_interval=2, wait_for_input=ApprovalInput
+            )
+            return approval.approved
+
+        @flow(persist_result=False)
+        async def flow_with_approval_task():
+            nonlocal flow_run_id
+            context = FlowRunContext.get()
+            flow_run_id = context.flow_run.id
+
+            approved = await get_approval()
+            return approved
+
+        async def flow_resumer():
+            # Wait on flow run to start
+            while not flow_run_id:
+                await anyio.sleep(0.1)
+
+            # Wait on flow run to pause
+            flow_run = await prefect_client.read_flow_run(flow_run_id)
+            while not flow_run.state.is_paused():
+                await asyncio.sleep(0.1)
+                flow_run = await prefect_client.read_flow_run(flow_run_id)
+
+            keyset = flow_run.state.state_details.run_input_keyset
+            assert keyset
+
+            # Wait for the flow run input schema to be saved
+            while not (await read_flow_run_input(keyset["schema"], flow_run_id)):
+                await asyncio.sleep(0.1)
+
+            await resume_flow_run(flow_run_id, run_input={"approved": True})
+
+        flow_run_state, _ = await asyncio.gather(
+            flow_with_approval_task(return_state=True),
+            flow_resumer(),
+        )
+        approved = await flow_run_state.result()
+        assert approved is True
+
+        # Ensure that the flow run did create the corresponding schema input
+        schema = await read_flow_run_input(
+            key="paused-1-schema", flow_run_id=flow_run_id
+        )
+        assert schema is not None
 
     async def test_paused_flows_fail_if_not_resumed(self):
         @task
@@ -2108,6 +2309,53 @@ class TestRunFlowInSubprocess:
         # Stays in running state because the flow run is aborted manually
         assert flow_run.state.is_running()
 
+    async def test_deployment_parameters_accessible_in_subprocess(
+        self, engine_type: Literal["sync", "async"], prefect_client: PrefectClient
+    ):
+        """Test that deployment.parameters is accessible in subprocess (issue #19329)."""
+        deployment_params = {
+            "source_name": "ABC",
+            "database_export_date": "2025-08-27",
+            "bucket_name": "data-migration",
+        }
+
+        if engine_type == "sync":
+
+            @flow(name=f"test_deployment_params_{uuid.uuid4()}", persist_result=True)
+            def foo(source_name: str, database_export_date: str, bucket_name: str):
+                from prefect.runtime import deployment
+
+                return deployment.parameters
+        else:
+
+            @flow(name=f"test_deployment_params_{uuid.uuid4()}", persist_result=True)
+            async def foo(
+                source_name: str, database_export_date: str, bucket_name: str
+            ):
+                from prefect.runtime import deployment
+
+                return deployment.parameters
+
+        flow_id = await prefect_client.create_flow(foo)
+        deployment_id = await prefect_client.create_deployment(
+            flow_id=flow_id,
+            name=f"test_deployment_params_{uuid.uuid4()}",
+            parameters=deployment_params,
+        )
+
+        flow_run = await prefect_client.create_flow_run_from_deployment(deployment_id)
+
+        process = run_flow_in_subprocess(foo, flow_run)
+        process.join()
+        assert process.exitcode == 0
+
+        flow_run = await prefect_client.read_flow_run(flow_run.id)
+        assert flow_run.state.is_completed()
+
+        # deployment.parameters should match what we set
+        result = await flow_run.state.result()
+        assert result == deployment_params
+
     async def test_flow_raises_a_base_exception(
         self, engine_type: Literal["sync", "async"]
     ):
@@ -2158,3 +2406,134 @@ class TestRunFlowInSubprocess:
         flow_run = await self.get_flow_run_for_flow(foo.name)
         # Stays in running state because the process died
         assert flow_run.state.is_running()
+
+
+class TestLeaseRenewal:
+    async def test_no_lease_renewal_sync(
+        self, prefect_client: PrefectClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_maintain_concurrency_lease = MagicMock()
+        monkeypatch.setattr(
+            "prefect.flow_engine.maintain_concurrency_lease",
+            mock_maintain_concurrency_lease,
+        )
+
+        @flow
+        def foo():
+            return 42
+
+        flow_id = await prefect_client.create_flow(foo)
+        # No limit, no lease
+        deployment_id = await prefect_client.create_deployment(
+            flow_id=flow_id,
+            name=f"test_lease_renewal_{uuid.uuid4()}",
+        )
+
+        flow_run = await prefect_client.create_flow_run_from_deployment(deployment_id)
+        assert flow_run.state.is_scheduled()
+
+        state = await propose_state(prefect_client, states.Pending(), flow_run.id)
+        assert state.is_pending()
+
+        run_flow(foo, flow_run)
+
+        mock_maintain_concurrency_lease.assert_not_called()
+
+    async def test_no_lease_renewal_async(
+        self, prefect_client: PrefectClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_maintain_concurrency_lease = MagicMock()
+        mock_maintain_concurrency_lease.return_value.__aenter__ = AsyncMock()
+        mock_maintain_concurrency_lease.return_value.__aenter__.return_value.__aexit__ = AsyncMock()
+        monkeypatch.setattr(
+            "prefect.flow_engine.amaintain_concurrency_lease",
+            mock_maintain_concurrency_lease,
+        )
+
+        @flow
+        async def foo():
+            return 42
+
+        flow_id = await prefect_client.create_flow(foo)
+        deployment_id = await prefect_client.create_deployment(
+            flow_id=flow_id,
+            name=f"test_lease_renewal_{uuid.uuid4()}",
+        )
+
+        flow_run = await prefect_client.create_flow_run_from_deployment(deployment_id)
+        assert flow_run.state.is_scheduled()
+
+        state = await propose_state(prefect_client, states.Pending(), flow_run.id)
+        assert state.is_pending()
+
+        await run_flow(foo, flow_run)
+
+        mock_maintain_concurrency_lease.assert_not_called()
+
+    async def test_lease_renewal_sync(
+        self, prefect_client: PrefectClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_maintain_concurrency_lease = MagicMock()
+        monkeypatch.setattr(
+            "prefect.flow_engine.maintain_concurrency_lease",
+            mock_maintain_concurrency_lease,
+        )
+
+        @flow
+        def foo():
+            return 42
+
+        flow_id = await prefect_client.create_flow(foo)
+        # Lease is created for the limit server-side
+        deployment_id = await prefect_client.create_deployment(
+            flow_id=flow_id,
+            name=f"test_lease_renewal_{uuid.uuid4()}",
+            concurrency_limit=1,
+        )
+
+        flow_run = await prefect_client.create_flow_run_from_deployment(deployment_id)
+        assert flow_run.state.is_scheduled()
+
+        state = await propose_state(prefect_client, states.Pending(), flow_run.id)
+        assert state.is_pending()
+
+        run_flow(foo, flow_run)
+
+        mock_maintain_concurrency_lease.assert_called_once_with(
+            ANY, 300, raise_on_lease_renewal_failure=True
+        )
+
+    async def test_lease_renewal_async(
+        self, prefect_client: PrefectClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        mock_maintain_concurrency_lease = MagicMock()
+        mock_maintain_concurrency_lease.return_value.__aenter__ = AsyncMock()
+        mock_maintain_concurrency_lease.return_value.__aenter__.return_value.__aexit__ = AsyncMock()
+        monkeypatch.setattr(
+            "prefect.flow_engine.amaintain_concurrency_lease",
+            mock_maintain_concurrency_lease,
+        )
+
+        @flow
+        async def foo():
+            return 42
+
+        flow_id = await prefect_client.create_flow(foo)
+        # Lease is created for the limit server-side
+        deployment_id = await prefect_client.create_deployment(
+            flow_id=flow_id,
+            name=f"test_lease_renewal_{uuid.uuid4()}",
+            concurrency_limit=1,
+        )
+
+        flow_run = await prefect_client.create_flow_run_from_deployment(deployment_id)
+        assert flow_run.state.is_scheduled()
+
+        state = await propose_state(prefect_client, states.Pending(), flow_run.id)
+        assert state.is_pending()
+
+        await run_flow(foo, flow_run)
+
+        mock_maintain_concurrency_lease.assert_called_once_with(
+            ANY, 300, raise_on_lease_renewal_failure=True
+        )

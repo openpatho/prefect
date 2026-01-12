@@ -12,7 +12,7 @@ from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Generator
 from unittest import mock
-from unittest.mock import ANY, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from rich.color import Color, ColorType
@@ -57,6 +57,8 @@ from prefect.logging.loggers import (
 from prefect.server.schemas.actions import LogCreate
 from prefect.settings import (
     PREFECT_API_KEY,
+    PREFECT_API_URL,
+    PREFECT_CLOUD_MAX_LOG_SIZE,
     PREFECT_LOGGING_COLORS,
     PREFECT_LOGGING_EXTRA_LOGGERS,
     PREFECT_LOGGING_LEVEL,
@@ -72,7 +74,6 @@ from prefect.settings import (
     temporary_settings,
 )
 from prefect.testing.cli import temporary_console_width
-from prefect.testing.utilities import AsyncMock
 from prefect.types._datetime import from_timestamp, now
 from prefect.utilities.names import obfuscate
 from prefect.workers.base import BaseJobConfiguration, BaseWorker
@@ -225,6 +226,58 @@ def test_setup_logging_uses_env_var_overrides(
         setup_logging()
 
     dictConfigMock.assert_called_once_with(expected_config)
+
+
+def test_setup_logging_preserves_existing_root_logger_configuration(
+    dictConfigMock: MagicMock,
+):
+    """
+    Test that setup_logging does not override the root logger configuration
+    if the user has already configured it.
+
+    This addresses issue #18872 where importing Prefect would overwrite
+    user-defined logging formats and handlers.
+    """
+    import logging
+
+    # Simulate user configuring the root logger before importing Prefect
+    root_logger = logging.getLogger()
+    handler = MagicMock()
+    root_logger.handlers = [handler]
+
+    # Run setup_logging (normally happens on import)
+    setup_logging()
+
+    # The config passed to dictConfig should not have a 'root' key
+    # since we detected existing root logger configuration
+    called_config = dictConfigMock.call_args[0][0]
+    assert "root" not in called_config
+
+    # Clean up
+    root_logger.handlers = []
+
+
+def test_setup_logging_applies_root_config_when_no_prior_configuration(
+    dictConfigMock: MagicMock,
+):
+    """
+    Test that setup_logging applies the root logger configuration
+    when the user hasn't configured logging beforehand.
+    """
+    import logging
+
+    # Ensure root logger has no handlers (fresh state)
+    root_logger = logging.getLogger()
+    root_logger.handlers = []
+
+    # Run setup_logging
+    setup_logging()
+
+    # The config should include root logger configuration
+    called_config = dictConfigMock.call_args[0][0]
+    assert "root" in called_config
+    assert called_config["root"]["level"] == "WARNING"
+    assert called_config["root"]["handlers"] == ["console"]
 
 
 def test_setting_aliases_respected_for_logging_config(tmp_path: Path):
@@ -819,10 +872,11 @@ class TestAPILogHandler:
             with temporary_settings(updates={PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: "1"}):
                 logger.info("test")
 
-        mock_log_worker.instance().send.assert_not_called()
+        mock_log_worker.instance().send.assert_called_once()
+        sent_log = mock_log_worker.instance().send.call_args[0][0]
         output = capsys.readouterr()
-        assert "ValueError" in output.err
-        assert "is greater than the max size of 1" in output.err
+        assert sent_log["message"].endswith("... [truncated]")
+        assert "ValueError" not in output.err
 
     def test_handler_knows_how_large_logs_are(self):
         dict_log = {
@@ -838,6 +892,60 @@ class TestAPILogHandler:
         assert log_size == 211
         handler = APILogHandler()
         assert handler._get_payload_size(dict_log) == log_size  # type: ignore[reportPrivateUsage]
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_defaults_to_cloud_value(self):
+        with temporary_settings(
+            updates={PREFECT_API_URL: "https://api.prefect.cloud/api"},
+            restore_defaults={PREFECT_LOGGING_TO_API_MAX_LOG_SIZE},
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 25_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_defaults_to_cloud_setting(self):
+        with temporary_settings(
+            updates={
+                PREFECT_API_URL: "https://api.prefect.cloud/api",
+                PREFECT_CLOUD_MAX_LOG_SIZE: 10_000,
+            },
+            restore_defaults={PREFECT_LOGGING_TO_API_MAX_LOG_SIZE},
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 10_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_respects_custom_value_lower_than_cloud(self):
+        with temporary_settings(
+            updates={
+                PREFECT_API_URL: "https://api.prefect.cloud/api",
+                PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: 10_000,
+            },
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 10_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_capped_at_cloud_max(self):
+        with temporary_settings(
+            updates={
+                PREFECT_API_URL: "https://api.prefect.cloud/api",
+                PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: 1_000_000,
+            },
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 25_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_does_not_change_for_self_hosted(self):
+        with temporary_settings(
+            updates={PREFECT_API_URL: "http://example.com/api"},
+            restore_defaults={PREFECT_LOGGING_TO_API_MAX_LOG_SIZE},
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 1_000_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_default_when_not_connected(self):
+        with temporary_settings(
+            restore_defaults={PREFECT_API_URL, PREFECT_LOGGING_TO_API_MAX_LOG_SIZE}
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 1_000_000
 
 
 WORKER_ID = uuid.uuid4()
@@ -1978,3 +2086,39 @@ def test_eavesdropping():
     logging.getLogger("my_logger").debug("This is after the context")
 
     assert eavesdropper.text() == "[INFO]: Hello, world!\n[WARNING]: Another one!"
+
+
+def test_prepare_truncates_oversized_log():
+    max_log_size = 500
+
+    handler = APILogHandler()
+
+    very_long_msg = "X" * (max_log_size * 2)
+    record = logging.LogRecord(
+        name="test.logger.flow",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=10,
+        msg=very_long_msg,
+        args=(),
+        exc_info=None,
+    )
+    record.flow_run_id = str(uuid.uuid4())
+
+    with patch(
+        "prefect.settings.PREFECT_LOGGING_TO_API_MAX_LOG_SIZE.value",
+        return_value=max_log_size,
+    ):
+        log = handler.prepare(record)
+
+    # Check truncation suffix is present
+    assert "... [truncated]" in log["message"]
+
+    # Check size does not exceed max_log_size
+    assert log["__payload_size__"] <= max_log_size
+
+    # flow_run_id should match
+    assert log["flow_run_id"] == record.flow_run_id
+
+    # Message should not be empty (except the truncation text)
+    assert log["message"].strip() != ""

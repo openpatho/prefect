@@ -2,10 +2,11 @@ import contextlib
 import datetime
 import math
 import random
-from datetime import timedelta
+from datetime import timedelta, timezone
 from itertools import product
 from typing import Optional
 from unittest import mock
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -13,6 +14,7 @@ import sqlalchemy as sa
 
 from prefect._result_records import ResultRecordMetadata
 from prefect.server import schemas
+from prefect.server.concurrency.lease_storage import get_concurrency_lease_storage
 from prefect.server.database import orm_models as orm
 from prefect.server.exceptions import ObjectNotFoundError
 from prefect.server.models import (
@@ -38,12 +40,14 @@ from prefect.server.orchestration.core_policy import (
     PreventRunningTasksFromStoppedFlows,
     ReleaseFlowConcurrencySlots,
     ReleaseTaskConcurrencySlots,
+    RemoveDeploymentConcurrencyLeaseForOldClientVersions,
     RenameReruns,
     RetryFailedFlows,
     RetryFailedTasks,
     SecureFlowConcurrencySlots,
     SecureTaskConcurrencySlots,
     UpdateFlowRunTrackerOnTasks,
+    ValidateDeploymentConcurrencyAtRunning,
     WaitForScheduledTime,
 )
 from prefect.server.orchestration.rules import (
@@ -55,8 +59,12 @@ from prefect.server.orchestration.rules import (
 from prefect.server.schemas import actions, states
 from prefect.server.schemas.responses import SetStateStatus
 from prefect.server.schemas.states import StateType
-from prefect.settings import PREFECT_DEPLOYMENT_CONCURRENCY_SLOT_WAIT_SECONDS
-from prefect.testing.utilities import AsyncMock
+from prefect.settings import (
+    PREFECT_DEPLOYMENT_CONCURRENCY_SLOT_WAIT_SECONDS,
+    PREFECT_SERVER_CONCURRENCY_INITIAL_DEPLOYMENT_LEASE_DURATION,
+    get_current_settings,
+    temporary_settings,
+)
 from prefect.types._datetime import DateTime, now, parse_datetime
 
 # Convert constants from sets to lists for deterministic ordering of tests
@@ -3453,16 +3461,22 @@ class TestFlowConcurrencyLimits:
         limit,
         flow,
         collision_strategy: Optional[schemas.core.ConcurrencyLimitStrategy] = None,
+        grace_period_seconds: Optional[int] = None,
     ):
         deployment_kwargs = {
             "name": f"test-deployment-{uuid4()}",
             "flow_id": flow.id,
             "concurrency_limit": limit,
         }
-        if collision_strategy:
+        if collision_strategy or grace_period_seconds is not None:
             deployment_kwargs["concurrency_options"] = {
                 "collision_strategy": collision_strategy
+                or schemas.core.ConcurrencyLimitStrategy.ENQUEUE
             }
+            if grace_period_seconds is not None:
+                deployment_kwargs["concurrency_options"]["grace_period_seconds"] = (
+                    grace_period_seconds
+                )
 
         deployment = await deployments.create_deployment(
             session=session,
@@ -3603,6 +3617,16 @@ class TestFlowConcurrencyLimits:
             await ctx1.validate_proposed_state()
 
         assert ctx1.response_status == SetStateStatus.ACCEPT
+        assert (
+            ctx1.validated_state.state_details.deployment_concurrency_lease_id
+            is not None
+        )
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.read_lease(
+            lease_id=ctx1.validated_state.state_details.deployment_concurrency_lease_id
+        )
+        assert lease.resource_ids == [deployment.concurrency_limit_id]
+        assert lease.metadata.slots == 1
 
         # Second run should be accepted
         ctx2 = await initialize_orchestration(
@@ -3615,6 +3639,12 @@ class TestFlowConcurrencyLimits:
                 await ctx2.validate_proposed_state()
 
         assert ctx2.response_status == SetStateStatus.ACCEPT
+        assert (
+            ctx2.validated_state.state_details.deployment_concurrency_lease_id
+            is not None
+        )
+        lease_ids = await lease_storage.read_active_lease_ids()
+        assert len(lease_ids) == 2
 
         # Third run should be delayed
         ctx3 = await initialize_orchestration(
@@ -3655,6 +3685,7 @@ class TestFlowConcurrencyLimits:
         )
 
         pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+        running_transition = (states.StateType.PENDING, states.StateType.RUNNING)
         completed_transition = (
             states.StateType.RUNNING,
             states.StateType.COMPLETED,
@@ -3672,6 +3703,16 @@ class TestFlowConcurrencyLimits:
             await ctx1.validate_proposed_state()
 
             assert ctx1.response_status == SetStateStatus.ACCEPT
+            assert (
+                ctx1.validated_state.state_details.deployment_concurrency_lease_id
+                is not None
+            )
+            lease_storage = get_concurrency_lease_storage()
+            lease = await lease_storage.read_lease(
+                lease_id=ctx1.validated_state.state_details.deployment_concurrency_lease_id
+            )
+            assert lease.resource_ids == [deployment.concurrency_limit_id]
+            assert lease.metadata.slots == 1
 
             # Second run should be delayed
             ctx2 = await initialize_orchestration(
@@ -3701,6 +3742,30 @@ class TestFlowConcurrencyLimits:
                 ctx2.response_details.reason == "Deployment concurrency limit reached."
             )
 
+            # Transition first run to running
+            ctx1_running = await initialize_orchestration(
+                session,
+                "flow",
+                *running_transition,
+                deployment_id=deployment.id,
+                run_override=ctx1.run,
+                initial_details=ctx1.validated_state.state_details,
+            )
+
+            async with contextlib.AsyncExitStack() as stack:
+                ctx1_running = await stack.enter_async_context(
+                    ValidateDeploymentConcurrencyAtRunning(
+                        ctx1_running, *running_transition
+                    )
+                )
+                await ctx1_running.validate_proposed_state()
+
+            # Lease ID should be copied to the running state
+            assert (
+                ctx1_running.validated_state.state_details.deployment_concurrency_lease_id
+                is not None
+            )
+
             # Complete the first run
             ctx1_completed = await initialize_orchestration(
                 session,
@@ -3708,6 +3773,7 @@ class TestFlowConcurrencyLimits:
                 *completed_transition,
                 deployment_id=deployment.id,
                 run_override=ctx1.run,
+                initial_details=ctx1_running.validated_state.state_details,
             )
 
             async with contextlib.AsyncExitStack() as stack:
@@ -3715,6 +3781,13 @@ class TestFlowConcurrencyLimits:
                     ReleaseFlowConcurrencySlots(ctx1_completed, *completed_transition)
                 )
                 await ctx1_completed.validate_proposed_state()
+
+            assert (
+                ctx1_completed.validated_state.state_details.deployment_concurrency_lease_id
+                is None
+            )
+            lease_ids = await lease_storage.read_active_lease_ids()
+            assert len(lease_ids) == 0
 
             # Now the second run should be accepted
             ctx2_retry = await initialize_orchestration(
@@ -4332,8 +4405,8 @@ class TestFlowConcurrencyLimits:
         pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
 
         policy = [
-            StateMutatingRule,
             SecureFlowConcurrencySlots,
+            StateMutatingRule,
             ReleaseFlowConcurrencySlots,
         ]
 
@@ -4351,3 +4424,308 @@ class TestFlowConcurrencyLimits:
         # The fizzled rule should have caused cleanup to revert the concurrency slot
 
         await assert_deployment_concurrency_limit(session, deployment, 1, 0)
+
+    async def test_lease_cleanup_on_fizzle(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        class StateMutatingRule(BaseOrchestrationRule):
+            FROM_STATES = ALL_ORCHESTRATION_STATES
+            TO_STATES = ALL_ORCHESTRATION_STATES
+
+            async def before_transition(self, initial_state, proposed_state, context):
+                mutated_state = proposed_state.model_copy()
+                mutated_state.type = random.choice(
+                    list(
+                        set(states.StateType)
+                        - {
+                            states.StateType.PENDING,
+                            states.StateType.RUNNING,
+                            states.StateType.CANCELLING,
+                        }
+                    )
+                )
+                await self.reject_transition(
+                    mutated_state, reason="gotta fizzle some rules, for fun"
+                )
+
+            async def after_transition(self, initial_state, validated_state, context):
+                pass
+
+            async def cleanup(self, initial_state, validated_state, context):
+                pass
+
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        policy = [
+            SecureFlowConcurrencySlots,
+            StateMutatingRule,
+            ReleaseFlowConcurrencySlots,
+        ]
+
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            *pending_transition,
+            deployment_id=deployment.id,
+            client_version="3.4.11",
+        )
+
+        async with contextlib.AsyncExitStack() as stack:
+            for rule in policy:
+                ctx = await stack.enter_async_context(rule(ctx, *pending_transition))
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.REJECT
+
+        # The fizzled rule should have caused cleanup to revert the concurrency slot
+
+        await assert_deployment_concurrency_limit(session, deployment, 1, 0)
+
+        # There should be no active leases
+
+        lease_storage = get_concurrency_lease_storage()
+        lease_ids = await lease_storage.read_active_lease_ids()
+        assert len(lease_ids) == 0
+
+    async def test_clear_lease_id_on_for_old_client_versions(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+        running_transition = (states.StateType.PENDING, states.StateType.RUNNING)
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.create_lease(
+            resource_ids=[deployment.concurrency_limit_id],
+            metadata=dict(slots=1),
+            ttl=timedelta(seconds=60),
+        )
+
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            *running_transition,
+            deployment_id=deployment.id,
+            initial_details=dict(deployment_concurrency_lease_id=lease.id),
+            client_version="3.4.10",
+        )
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                RemoveDeploymentConcurrencyLeaseForOldClientVersions(
+                    ctx, *running_transition
+                )
+            )
+            await ctx.validate_proposed_state()
+
+        lease_ids = await lease_storage.read_active_lease_ids()
+        assert len(lease_ids) == 0
+
+    async def test_dont_clear_lease_id_on_for_new_client_versions(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+        running_transition = (states.StateType.PENDING, states.StateType.RUNNING)
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.create_lease(
+            resource_ids=[deployment.concurrency_limit_id],
+            metadata=dict(slots=1),
+            ttl=timedelta(seconds=60),
+        )
+
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            *running_transition,
+            deployment_id=deployment.id,
+            initial_details=dict(deployment_concurrency_lease_id=lease.id),
+            client_version="3.4.11",
+        )
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                RemoveDeploymentConcurrencyLeaseForOldClientVersions(
+                    ctx, *running_transition
+                )
+            )
+            await ctx.validate_proposed_state()
+
+        lease_ids = await lease_storage.read_active_lease_ids()
+        assert len(lease_ids) == 1
+
+    async def test_configurable_initial_lease_duration(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        """Test that SecureFlowConcurrencySlots uses configurable initial lease timeout."""
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        # Use temporary_settings to set custom initial lease timeout
+        with temporary_settings(
+            updates={
+                PREFECT_SERVER_CONCURRENCY_INITIAL_DEPLOYMENT_LEASE_DURATION: 123.0
+            }
+        ):
+            ctx = await initialize_orchestration(
+                session, "flow", *pending_transition, deployment_id=deployment.id
+            )
+
+            created_at = datetime.datetime.now(timezone.utc)
+
+            async with contextlib.AsyncExitStack() as stack:
+                ctx = await stack.enter_async_context(
+                    SecureFlowConcurrencySlots(ctx, *pending_transition)
+                )
+                await ctx.validate_proposed_state()
+
+            assert ctx.response_status == SetStateStatus.ACCEPT
+            lease_id = ctx.validated_state.state_details.deployment_concurrency_lease_id
+            assert lease_id is not None
+
+            # Verify the lease was created with updated TTL
+            lease_storage = get_concurrency_lease_storage()
+            lease = await lease_storage.read_lease(lease_id=lease_id)
+            assert lease is not None
+
+            actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
+            assert abs(actual_ttl_seconds - 123.0) < 1  # Within 1 second
+
+    async def test_uses_server_setting_when_concurrency_options_not_set(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        """Test that server setting is used when concurrency_options is not set."""
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+
+        created_at = datetime.datetime.now(timezone.utc)
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                SecureFlowConcurrencySlots(ctx, *pending_transition)
+            )
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        lease_id = ctx.validated_state.state_details.deployment_concurrency_lease_id
+        assert lease_id is not None
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.read_lease(lease_id=lease_id)
+        assert lease is not None
+
+        expected_seconds = (
+            get_current_settings().server.concurrency.initial_deployment_lease_duration
+        )
+        actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
+        assert abs(actual_ttl_seconds - expected_seconds) < 5
+
+    async def test_uses_server_setting_when_grace_period_seconds_not_set(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        """Test that server setting is used when concurrency_options exists but grace_period_seconds is not set."""
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session,
+            1,
+            flow,
+            collision_strategy=schemas.core.ConcurrencyLimitStrategy.ENQUEUE,
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+
+        created_at = datetime.datetime.now(timezone.utc)
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                SecureFlowConcurrencySlots(ctx, *pending_transition)
+            )
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        lease_id = ctx.validated_state.state_details.deployment_concurrency_lease_id
+        assert lease_id is not None
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.read_lease(lease_id=lease_id)
+        assert lease is not None
+
+        # Should use server setting (300s by default) when grace_period_seconds is not explicitly set
+        expected_seconds = (
+            get_current_settings().server.concurrency.initial_deployment_lease_duration
+        )
+        actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
+        assert abs(actual_ttl_seconds - expected_seconds) < 5
+
+    async def test_uses_custom_grace_period_when_configured(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        """Test that custom grace period is used when configured."""
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow, grace_period_seconds=720
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+
+        created_at = datetime.datetime.now(timezone.utc)
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                SecureFlowConcurrencySlots(ctx, *pending_transition)
+            )
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        lease_id = ctx.validated_state.state_details.deployment_concurrency_lease_id
+        assert lease_id is not None
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.read_lease(lease_id=lease_id)
+        assert lease is not None
+
+        actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
+        assert abs(actual_ttl_seconds - 720.0) < 5

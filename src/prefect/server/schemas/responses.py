@@ -369,9 +369,6 @@ class TaskRunResponse(ORMBaseModel):
         description="The version of the task executed in this task run.",
         examples=["1.0"],
     )
-    parameters: dict[str, Any] = Field(
-        default_factory=dict, description="Parameters for the task run."
-    )
     task_inputs: dict[
         str,
         list[
@@ -383,11 +380,6 @@ class TaskRunResponse(ORMBaseModel):
             ]
         ],
     ] = Field(default_factory=dict, description="Inputs provided to the task run.")
-    context: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Additional context for the task run.",
-        examples=[{"my_var": "my_val"}],
-    )
     empirical_policy: schemas.core.TaskRunPolicy = Field(
         default_factory=schemas.core.TaskRunPolicy,
         description="The task run's empirical retry policy.",
@@ -449,6 +441,10 @@ class DeploymentResponse(ORMBaseModel):
             "The work queue for the deployment. If no work queue is set, work will not"
             " be scheduled."
         ),
+    )
+    work_queue_id: Optional[UUID] = Field(
+        default=None,
+        description="The id of the work pool queue to which this deployment is assigned.",
     )
     last_polled: Optional[DateTime] = Field(
         default=None,
@@ -520,6 +516,7 @@ class DeploymentResponse(ORMBaseModel):
 
         if from_attributes:
             if obj.work_queue:
+                response.work_queue_id = obj.work_queue.id
                 response.work_queue_name = obj.work_queue.name
                 if obj.work_queue.work_pool:
                     response.work_pool_name = obj.work_queue.work_pool.name

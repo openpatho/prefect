@@ -6,8 +6,6 @@ import contextvars
 import importlib
 import ipaddress
 import json
-import shlex
-import sys
 from copy import deepcopy
 from functools import partial
 from textwrap import dedent
@@ -23,7 +21,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm
 from rich.syntax import Syntax
 
-from prefect.cli._prompts import prompt
+from prefect._internal.installation import ainstall_packages
 from prefect.client.schemas.actions import BlockDocumentCreate
 from prefect.client.utilities import inject_client
 from prefect.exceptions import ObjectNotFound
@@ -1121,9 +1119,7 @@ class ElasticContainerServicePushProvisioner:
 
     async def _prompt_boto3_installation(self):
         global boto3
-        await run_process(
-            [shlex.quote(sys.executable), "-m", "pip", "install", "boto3"]
-        )
+        await ainstall_packages(["boto3"])
         boto3 = importlib.import_module("boto3")
 
     @staticmethod
@@ -1182,6 +1178,8 @@ class ElasticContainerServicePushProvisioner:
         Returns:
             dict: An updated copy base job template.
         """
+        from prefect.cli._prompts import prompt
+
         if not self.is_boto3_installed():
             if self.console.is_interactive and Confirm.ask(
                 "boto3 is required to configure your AWS account. Would you like to"

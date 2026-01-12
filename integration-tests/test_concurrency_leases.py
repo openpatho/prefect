@@ -30,14 +30,6 @@ from prefect.server.concurrency.lease_storage.filesystem import (
 )
 
 
-@pytest.fixture(autouse=True)
-async def clear_lease_storage():
-    lease_storage = get_concurrency_lease_storage()
-    active_lease_ids = await lease_storage.read_active_lease_ids()
-    for lease_id in active_lease_ids:
-        await lease_storage.revoke_lease(lease_id)
-
-
 @pytest.fixture
 async def concurrency_limit():
     async with prefect.get_client() as client:
@@ -133,6 +125,7 @@ async def test_async_concurrency_with_leases(concurrency_limit: GlobalConcurrenc
         limit = await client.read_global_concurrency_limit_by_name(
             name=concurrency_limit.name
         )
+        assert limit.active_slots == 1
 
     # Force lease to expire immediately
     await lease_storage.renew_lease(active_lease.id, timedelta(seconds=0))
@@ -230,6 +223,7 @@ async def test_sync_concurrency_with_leases(concurrency_limit: GlobalConcurrency
         limit = await client.read_global_concurrency_limit_by_name(
             name=concurrency_limit.name
         )
+        assert limit.active_slots == 1
 
     # Force lease to expire immediately
     await lease_storage.renew_lease(active_lease.id, timedelta(seconds=0))

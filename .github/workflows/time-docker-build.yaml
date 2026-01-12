@@ -16,7 +16,7 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -29,7 +29,7 @@ jobs:
       # For PRs, checkout the base branch to compare against
       - name: Checkout base branch
         if: github.base_ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.base_ref }}
           clean: true
@@ -49,6 +49,7 @@ jobs:
             --platform linux/amd64,linux/arm64 \
             --no-cache \
             --progress=plain \
+            --build-arg NODE_VERSION=20.19.0 \
             .
           end_time=$(date +%s)
           base_time=$((end_time - start_time))
@@ -57,7 +58,7 @@ jobs:
       # For PRs, checkout back to the PR's HEAD
       - name: Checkout PR branch
         if: github.base_ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.head_ref }}
           clean: true

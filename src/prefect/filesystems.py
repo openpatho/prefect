@@ -159,7 +159,9 @@ class LocalFileSystem(WritableFileSystem, WritableDeploymentStorage):
         else:
             ignore_func = None
 
-        copytree(from_path, local_path, dirs_exist_ok=True, ignore=ignore_func)
+        copytree(
+            from_path, local_path, dirs_exist_ok=True, ignore=ignore_func, symlinks=True
+        )
 
     @async_dispatch(aget_directory)
     def get_directory(
@@ -203,7 +205,9 @@ class LocalFileSystem(WritableFileSystem, WritableDeploymentStorage):
         else:
             ignore_func = None
 
-        copytree(from_path, local_path, dirs_exist_ok=True, ignore=ignore_func)
+        copytree(
+            from_path, local_path, dirs_exist_ok=True, ignore=ignore_func, symlinks=True
+        )
 
     async def _get_ignore_func(self, local_path: str, ignore_file: str):
         with open(ignore_file) as f:
@@ -514,6 +518,10 @@ class RemoteFileSystem(WritableFileSystem, WritableDeploymentStorage):
     async def write_path(self, path: str, content: bytes) -> str:
         path = self._resolve_path(path)
         dirpath = path[: path.rindex("/")]
+
+        if self.basepath.startswith("smb://"):
+            parsed = urllib.parse.urlparse(dirpath)
+            dirpath = parsed.path
 
         self.filesystem.makedirs(dirpath, exist_ok=True)
 

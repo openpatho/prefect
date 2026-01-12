@@ -57,6 +57,8 @@ src/prefect/server/ui_build/*
 
 # Databases
 *.db
+local.duckdb
+local.duckdb.wal
 
 # API artifacts
 
@@ -69,6 +71,7 @@ dask-worker-space/
 # Editors
 .idea/
 .vscode/
+.zed/
 !ui/.vscode/
 
 # Prefect files

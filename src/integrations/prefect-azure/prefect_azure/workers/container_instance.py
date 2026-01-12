@@ -117,7 +117,7 @@ ACI_DEFAULT_GPU = 0.0
 DEFAULT_CONTAINER_ENTRYPOINT = "/opt/prefect/entrypoint.sh"
 # environment variables that ACI should treat as secure variables so they
 # won't appear in logs
-ENV_SECRETS = ["PREFECT_API_KEY"]
+ENV_SECRETS = ["PREFECT_API_KEY", "PREFECT_API_AUTH_STRING"]
 
 # The maximum time to wait for container group deletion before giving up and
 # moving on. Deletion is usually quick, so exceeding this timeout means something
@@ -951,6 +951,10 @@ class AzureContainerWorker(
 
             try:
                 line_time = dateutil.parser.parse(line_timestamp)
+                # Ensure line_time is timezone-aware for comparison
+                if line_time.tzinfo is None:
+                    # Assume same timezone as last_written_time
+                    line_time = line_time.replace(tzinfo=last_written_time.tzinfo)
                 if line_time > last_written_time:
                     self._write_output_line(line)
                     last_written_time = line_time

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncContextManager, AsyncGenerator, Callable, Optional, Type
 
 import pytest
-from sqlalchemy.exc import InterfaceError
+from sqlalchemy.exc import DBAPIError, InterfaceError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from prefect.blocks.notifications import NotificationBlock
@@ -109,7 +109,7 @@ async def clear_db(db, request):
                     for table in reversed(orm_models.Base.metadata.sorted_tables):
                         await session.execute(table.delete())
                     break
-            except InterfaceError:
+            except (InterfaceError, DBAPIError):
                 if attempt < max_retries - 1:
                     print(
                         "Connection issue. Retrying entire deletion operation"
@@ -118,6 +118,15 @@ async def clear_db(db, request):
                     await asyncio.sleep(retry_delay)
                 else:
                     raise
+
+    # Also clear the memory lease storage singleton to prevent test pollution
+    from prefect.server.concurrency.lease_storage.memory import (
+        ConcurrencyLeaseStorage,
+    )
+
+    storage = ConcurrencyLeaseStorage()
+    storage.leases.clear()
+    storage.expirations.clear()
 
     yield
 
@@ -1026,6 +1035,7 @@ def initialize_orchestration(flow):
         initial_state_name: Optional[str] = None,
         proposed_state_name: Optional[str] = None,
         deployment_id: Optional[str] = None,
+        client_version: Optional[str] = None,
     ):
         flow_create_kwargs = {}
         empirical_policy = {}
@@ -1109,6 +1119,7 @@ def initialize_orchestration(flow):
             run=run,
             initial_state=initial_state,
             proposed_state=proposed_state,
+            client_version=client_version,
         )
 
         return ctx

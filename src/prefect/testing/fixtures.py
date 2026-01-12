@@ -6,6 +6,7 @@ import sys
 from contextlib import contextmanager
 from typing import Any, AsyncGenerator, Callable, Generator, List, Optional, Union
 from unittest import mock
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import anyio
@@ -30,13 +31,11 @@ from prefect.server.api.server import SubprocessASGIServer
 from prefect.server.events.pipeline import EventsPipeline
 from prefect.settings import (
     PREFECT_API_URL,
-    PREFECT_EXPERIMENTS_LINEAGE_EVENTS_ENABLED,
     PREFECT_SERVER_ALLOW_EPHEMERAL_MODE,
     PREFECT_SERVER_CSRF_PROTECTION_ENABLED,
     get_current_settings,
     temporary_settings,
 )
-from prefect.testing.utilities import AsyncMock
 from prefect.types._datetime import DateTime, now
 from prefect.utilities.asyncutils import sync_compatible
 from prefect.utilities.processutils import open_process
@@ -65,6 +64,7 @@ def is_port_in_use(port: int) -> bool:
 @pytest.fixture(scope="session")
 async def hosted_api_server(
     unused_tcp_port_factory: Callable[[], int],
+    test_database_connection_url: Optional[str],
 ) -> AsyncGenerator[str, None]:
     """
     Runs an instance of the Prefect API server in a subprocess instead of the using the
@@ -75,6 +75,9 @@ async def hosted_api_server(
     Yields:
         The API URL
     """
+    # Ensure the per-worker database URL override is applied before we start the server
+    _ = test_database_connection_url
+
     port = unused_tcp_port_factory()
     print(f"Running hosted API server on port {port}")
 
@@ -475,10 +478,3 @@ def reset_worker_events(
     yield
     assert isinstance(asserting_events_worker._client, AssertingEventsClient)
     asserting_events_worker._client.events = []
-
-
-@pytest.fixture
-def enable_lineage_events() -> Generator[None, None, None]:
-    """A fixture that ensures lineage events are enabled."""
-    with temporary_settings(updates={PREFECT_EXPERIMENTS_LINEAGE_EVENTS_ENABLED: True}):
-        yield

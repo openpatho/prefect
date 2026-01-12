@@ -36,12 +36,18 @@ prefect config view            # Inspect configuration
 
 ## Development Guidelines
 
+### Make sure you have a Prefect server or Prefect Cloud
+- use `prefect config view` to check your current profile
+- run `prefect server start` in the background if needed
+
+
 ### Code Conventions
 
-- Python 3.9+ with modern typing (`list[int]`, `T | None`)
+- Python 3.10+ with modern typing (`list[int]`, `T | None`)
 - Private implementation details (`_private_method`)
 - No public API changes without approval
 - Use `uv` for dependency management, not `pip`
+- Do not use deferred imports (imports inside functions) unless absolutely necessary to avoid circular imports or for optional dependencies
 
 ### Testing
 
@@ -53,9 +59,10 @@ prefect config view            # Inspect configuration
 ### Working on Issues
 
 - Create repros in `repros/` directory (gitignored)
-- Name files by issue number: `repros/1234.py`
+- Name files by issue number: `repros/1234.py` (only create one file per issue)
 - Reproduce before fixing
 - Add unit tests for fixes
+- DO NOT delete files from `repros/` directory after reproducing the issue unless asked
 
 ### PR Style
 
@@ -70,3 +77,4 @@ prefect config view            # Inspect configuration
 - Pre-commit hooks required (never use `--no-verify`)
 - Dependencies: updates to client-side deps in `@pyproject.toml` require parallel changes ing `@client/pyproject.toml`
 - AGENTS.md always symlinked to CLAUDE.md
+- the redis lease storage lives in @src/integrations/prefect-redis/

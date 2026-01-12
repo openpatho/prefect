@@ -2,15 +2,16 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Tuple
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import prefect
 from prefect.filesystems import (
+    SMB,
     LocalFileSystem,
     RemoteFileSystem,
 )
-from prefect.testing.utilities import MagicMock
 from prefect.utilities.filesystem import tmpchdir
 
 TEST_PROJECTS_DIR = prefect.__development_base_path__ / "tests" / "test-projects"
@@ -265,6 +266,67 @@ class TestLocalFileSystem:
 
         assert (result_dir / "file.txt").read_text() == "test content"
 
+    async def test_get_directory_preserves_symlinks(self, tmp_path):
+        """Test that get_directory preserves symlinks instead of following them.
+
+        This verifies the fix for issue #7868 where symlinks were being resolved
+        and their target files copied, potentially exposing sensitive files.
+        """
+        # Create source directory structure
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+
+        # Create a real file
+        real_file = src_dir / "real_file.txt"
+        real_file.write_text("real content")
+
+        # Create a symlink within the source directory
+        symlink_file = src_dir / "link_file.txt"
+        symlink_file.symlink_to(real_file)
+
+        # Create a destination directory
+        dst_dir = tmp_path / "dst"
+        dst_dir.mkdir()
+
+        # Use LocalFileSystem to copy
+        fs = LocalFileSystem(basepath=str(src_dir))
+        await fs.get_directory(from_path=str(src_dir), local_path=str(dst_dir))
+
+        # Verify the symlink is preserved as a symlink
+        copied_symlink = dst_dir / "link_file.txt"
+        assert copied_symlink.is_symlink(), "Symlink should be preserved as a symlink"
+
+        # Verify the real file is copied
+        copied_real = dst_dir / "real_file.txt"
+        assert copied_real.exists()
+        assert copied_real.read_text() == "real content"
+
+    def test_get_directory_preserves_symlinks_sync(self, tmp_path):
+        """Test that sync get_directory also preserves symlinks."""
+        # Create source directory structure
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+
+        # Create a real file
+        real_file = src_dir / "real_file.txt"
+        real_file.write_text("real content")
+
+        # Create a symlink within the source directory
+        symlink_file = src_dir / "link_file.txt"
+        symlink_file.symlink_to(real_file)
+
+        # Create a destination directory
+        dst_dir = tmp_path / "dst"
+        dst_dir.mkdir()
+
+        # Use LocalFileSystem to copy
+        fs = LocalFileSystem(basepath=str(src_dir))
+        fs.get_directory(from_path=str(src_dir), local_path=str(dst_dir))
+
+        # Verify the symlink is preserved as a symlink
+        copied_symlink = dst_dir / "link_file.txt"
+        assert copied_symlink.is_symlink(), "Symlink should be preserved as a symlink"
+
 
 class TestRemoteFileSystem:
     def test_must_contain_scheme(self):
@@ -485,3 +547,52 @@ class TestRemoteFileSystem:
             fs = LocalFileSystem(basepath=base_path)
             await fs.put_directory(to_path=null_value, local_path=local_path)
         assert (local_path / "test").exists()
+
+
+@pytest.importorskip("fsspec_implementations.smb", reason="requires fsspec[smb]")
+class TestSMB:
+    @pytest.fixture
+    def smb_block(self):
+        # This SMB block configuration will be used to generate the basepath
+        # e.g., smb://my.smb.server.edu/prefect/storage
+        return SMB(
+            share_path="/prefect/storage",
+            smb_host="my.smb.server.edu",
+            smb_username="testuser",
+            smb_password="testpassword",
+        )
+
+    @patch("fsspec.implementations.smb.smbclient")
+    async def test_write_path_constructs_good_unc_path(self, mock_smbclient, smb_block):
+        """
+        This test reproduces the issue where RemoteFileSystem passes a full URI
+        to the underlying fsspec SMBFileSystem, causing a malformed UNC path
+        to be constructed, which leads to connection errors.
+        """
+        # Mock the session registration to avoid actual network calls during
+        # the initialization of fsspec's SMBFileSystem.
+        mock_smbclient.register_session.return_value = None
+
+        # Mock open_file to prevent any actual file writing attempts. We only
+        # care about the directory creation logic.
+        mock_smbclient.open_file.return_value = MagicMock()
+
+        # Call the write_path method. This is where the incorrect path
+        # construction happens internally.
+        await smb_block.write_path("test-dir/test-file.txt", content=b"hello")
+
+        # `RemoteFileSystem.write_path` calls `makedirs` on the fsspec filesystem,
+        # which in turn calls `smbclient.makedirs`. We assert that this was called.
+        mock_smbclient.makedirs.assert_called_once()
+
+        # Now, we inspect the path that was passed to the mocked `smbclient.makedirs`.
+        call_args, _ = mock_smbclient.makedirs.call_args
+        unc_path = call_args[0]
+
+        # This is the core of the test. The bug causes the full URI to be passed
+        # to fsspec, which then prepends the host again, creating a malformed path.
+        # e.g. \\my.smb.server.edu\smb:\\my.smb.server.edu\prefect\storage\test-dir
+        assert unc_path.count(smb_block.smb_host) == 1, (
+            "The host name should not be duplicated"
+        )
+        assert unc_path == r"\\my.smb.server.edu\prefect\storage\test-dir"

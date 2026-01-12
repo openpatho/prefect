@@ -10,7 +10,7 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-	{ ignores: ["dist", "src/api/prefect.ts"] },
+	{ ignores: ["dist", "src/api/prefect.ts", "e2e/**", "playwright.config.ts"] },
 	{
 		extends: [
 			js.configs.recommended,
@@ -43,6 +43,8 @@ export default tseslint.config(
 			],
 			...react.configs.recommended.rules,
 			...react.configs["jsx-runtime"].rules,
+			// TypeScript provides type checking; prop-types are unnecessary
+			"react/prop-types": "off",
 		},
 	},
 	...pluginQuery.configs["flat/recommended"],

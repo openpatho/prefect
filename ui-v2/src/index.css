@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
-@plugin 'tailwindcss-animate';
-@plugin '@tailwindcss/typography';
+@plugin "tailwindcss-animate";
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -173,4 +173,16 @@
 
 .terminal-cursor {
 	animation: blink 1.2s steps(2) infinite;
+}
+
+/* Remove the native calendar icon on date inputs (Chrome, Safari, Edge) */
+@layer base {
+	input[type="date"]::-webkit-calendar-picker-indicator {
+		display: none;
+		-webkit-appearance: none;
+	}
+	input[type="time"]::-webkit-calendar-picker-indicator {
+		display: none;
+		-webkit-appearance: none;
+	}
 }

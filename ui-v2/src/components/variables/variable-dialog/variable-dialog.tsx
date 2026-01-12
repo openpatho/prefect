@@ -23,10 +23,17 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { JsonInput } from "@/components/ui/json-input";
+import { LazyJsonInput as JsonInput } from "@/components/ui/json-input-lazy";
 import { TagsInput } from "@/components/ui/tags-input";
 import { useCreateVariable, useUpdateVariable } from "@/hooks/variables";
-import type { JSONValue } from "@/lib/types";
+
+export type JSONValue =
+	| string
+	| number
+	| boolean
+	| Record<string, never>
+	| unknown[]
+	| null;
 
 const formSchema = z.object({
 	name: z.string().min(2, { message: "Name must be at least 2 characters" }),

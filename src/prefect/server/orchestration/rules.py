@@ -5,7 +5,7 @@ This module contains all the core concepts necessary to implement Prefect's stat
 orchestration engine. These states correspond to intuitive descriptions of all the
 points that a Prefect flow or task can observe executing user code and intervene, if
 necessary. A detailed description of states can be found in our concept
-[documentation](/concepts/states).
+[documentation](https://docs.prefect.io/v3/concepts/states).
 
 Prefect's orchestration engine operates under the assumption that no governed user code
 will execute without first requesting Prefect REST API validate a change in state and record
@@ -32,7 +32,6 @@ from typing import (
     Union,
 )
 
-import sqlalchemy as sa
 from pydantic import ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing_extensions import Self
@@ -110,7 +109,7 @@ class OrchestrationContext(PrefectBaseModel, Generic[T, RP]):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(arbitrary_types_allowed=True)
 
-    session: Union[sa.orm.Session, AsyncSession]
+    session: AsyncSession
     initial_state: Optional[states.State] = None
     proposed_state: Optional[states.State] = None
     validated_state: Optional[states.State] = Field(default=None)
@@ -120,6 +119,7 @@ class OrchestrationContext(PrefectBaseModel, Generic[T, RP]):
     response_details: StateResponseDetails = Field(default_factory=StateAcceptDetails)
     orchestration_error: Optional[Exception] = Field(default=None)
     parameters: dict[Any, Any] = Field(default_factory=dict)
+    client_version: Optional[str] = None
     run: T
 
     @property

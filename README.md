@@ -62,7 +62,7 @@ Workflow activity is tracked and can be monitored with a self-hosted [Prefect se
 
 ## Getting started
 
-Prefect requires Python 3.9+. To [install the latest version of Prefect](https://docs.prefect.io/v3/get-started/install), run one of the following commands:
+Prefect requires Python 3.10+. To [install the latest version of Prefect](https://docs.prefect.io/v3/get-started/install), run one of the following commands:
 
 ```bash
 pip install -U prefect
@@ -94,7 +94,7 @@ def github_stars(repos: list[str]):
 
 # run the flow!
 if __name__ == "__main__":
-    github_stars(["PrefectHQ/Prefect"])
+    github_stars(["PrefectHQ/prefect"])
 ```
 
 Fire up a Prefect server and open the UI at http://localhost:4200 to see what happened:
@@ -143,7 +143,8 @@ Join a thriving community of over 25,000 practitioners who solve data challenges
 🌐 **[Explore the Documentation](https://docs.prefect.io)** - Comprehensive guides and API references  
 💬 **[Join the Slack Community](https://prefect.io/slack)** - Connect with thousands of practitioners  
 🤝 **[Contribute to Prefect](https://docs.prefect.io/contribute/)** - Help shape the future of the project  
- 🔌 **[Support or create a new Prefect integration](https://docs.prefect.io/contribute/contribute-integrations)** - Extend Prefect's capabilities
+ 🔌 **[Support or create a new Prefect integration](https://docs.prefect.io/contribute/contribute-integrations)** - Extend Prefect's capabilities   
+📋 **[Tail the Dev Log](https://dev-log.prefect.io/)** - Prefect's open source development blog
 
 ### Stay Informed
 📥 **[Subscribe to our Newsletter](https://prefect.io/newsletter)** - Get the latest Prefect news and updates  

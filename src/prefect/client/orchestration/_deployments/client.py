@@ -8,7 +8,7 @@ from httpx import HTTPStatusError, RequestError
 
 from prefect._internal.compatibility.deprecated import deprecated_callable
 from prefect.client.orchestration.base import BaseAsyncClient, BaseClient
-from prefect.exceptions import ObjectNotFound
+from prefect.exceptions import ObjectAlreadyExists, ObjectLimitReached, ObjectNotFound
 
 if TYPE_CHECKING:
     import datetime
@@ -99,8 +99,6 @@ class DeploymentClient(BaseClient):
 
         from prefect.client.schemas.actions import DeploymentCreate
 
-        if parameter_openapi_schema is None:
-            parameter_openapi_schema = {}
         deployment_create = DeploymentCreate(
             flow_id=flow_id,
             name=name,
@@ -115,7 +113,7 @@ class DeploymentClient(BaseClient):
             entrypoint=entrypoint,
             infrastructure_document_id=infrastructure_document_id,
             job_variables=dict(job_variables or {}),
-            parameter_openapi_schema=parameter_openapi_schema,
+            parameter_openapi_schema=parameter_openapi_schema or {},
             paused=paused,
             schedules=schedules or [],
             concurrency_limit=concurrency_limit,
@@ -159,8 +157,22 @@ class DeploymentClient(BaseClient):
             payload["version_info"] = deployment_create.version_info.model_dump(
                 mode="json"
             )
+        if deployment_create.concurrency_options:
+            payload["concurrency_options"] = (
+                deployment_create.concurrency_options.model_dump(
+                    mode="json", exclude_unset=True
+                )
+            )
 
-        response = self.request("POST", "/deployments/", json=payload)
+        try:
+            response = self.request("POST", "/deployments/", json=payload)
+        except HTTPStatusError as e:
+            if e.response.status_code == 403 and "maximum number" in str(e):
+                raise ObjectLimitReached(http_exc=e) from e
+            if e.response.status_code == 409:
+                raise ObjectAlreadyExists(http_exc=e) from e
+            else:
+                raise
 
         deployment_id = response.json().get("id")
         if not deployment_id:
@@ -759,8 +771,6 @@ class DeploymentAsyncClient(BaseAsyncClient):
 
         from prefect.client.schemas.actions import DeploymentCreate
 
-        if parameter_openapi_schema is None:
-            parameter_openapi_schema = {}
         deployment_create = DeploymentCreate(
             flow_id=flow_id,
             name=name,
@@ -775,7 +785,7 @@ class DeploymentAsyncClient(BaseAsyncClient):
             entrypoint=entrypoint,
             infrastructure_document_id=infrastructure_document_id,
             job_variables=dict(job_variables or {}),
-            parameter_openapi_schema=parameter_openapi_schema,
+            parameter_openapi_schema=parameter_openapi_schema or {},
             paused=paused,
             schedules=schedules or [],
             concurrency_limit=concurrency_limit,
@@ -819,8 +829,25 @@ class DeploymentAsyncClient(BaseAsyncClient):
             payload["version_info"] = deployment_create.version_info.model_dump(
                 mode="json"
             )
+        if deployment_create.concurrency_options:
+            payload["concurrency_options"] = (
+                deployment_create.concurrency_options.model_dump(
+                    mode="json", exclude_unset=True
+                )
+            )
 
-        response = await self.request("POST", "/deployments/", json=payload)
+        try:
+            response = await self.request("POST", "/deployments/", json=payload)
+        except HTTPStatusError as e:
+            if e.response.status_code == 403 and "maximum number of deployments" in str(
+                e
+            ):
+                raise ObjectLimitReached(http_exc=e) from e
+            if e.response.status_code == 409:
+                raise ObjectAlreadyExists(http_exc=e) from e
+            else:
+                raise
+
         deployment_id = response.json().get("id")
         if not deployment_id:
             raise RequestError(f"Malformed response: {response}")

@@ -1,8 +1,8 @@
 import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
-import Markdown from "react-markdown";
 import type { Artifact } from "@/api/artifacts";
-import { cn } from "@/lib/utils";
+import { LazyMarkdown } from "@/components/ui/lazy-markdown";
+import { cn } from "@/utils";
 import { formatDate } from "@/utils/date";
 import { Card, CardContent, CardHeader } from "../ui/card";
 import { Typography } from "../ui/typography";
@@ -61,7 +61,7 @@ export const ArtifactCard = ({
 					<hr className="my-2" />
 					{artifact.description ? (
 						<div className="text-muted-foreground overflow-hidden truncate">
-							<Markdown>{artifact.description ?? ""}</Markdown>
+							<LazyMarkdown>{artifact.description ?? ""}</LazyMarkdown>
 						</div>
 					) : (
 						<Typography

@@ -65,9 +65,7 @@ def get_prefect_image_name(
     except Exception:
         # If git is not available, fallback to the first 7 characters of the full revision ID
         short_sha = prefect.__version_info__["full-revisionid"][:7]
-    prefect_version = (
-        parsed_version.base_version if is_prod_build else f"sha-{short_sha}"
-    )
+    prefect_version = parsed_version.public if is_prod_build else f"sha-{short_sha}"
 
     python_version = python_version or python_version_minor()
 
@@ -607,9 +605,7 @@ def generate_default_dockerfile(context: Optional[Path] = None):
 
     if (context / "requirements.txt").exists():
         lines.append(f"COPY requirements.txt /opt/prefect/{dir_name}/requirements.txt")
-        lines.append(
-            f"RUN python -m pip install -r /opt/prefect/{dir_name}/requirements.txt"
-        )
+        lines.append(f"RUN uv pip install -r /opt/prefect/{dir_name}/requirements.txt")
 
     lines.append(f"COPY . /opt/prefect/{dir_name}/")
     lines.append(f"WORKDIR /opt/prefect/{dir_name}/")
