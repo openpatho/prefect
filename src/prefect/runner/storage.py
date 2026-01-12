@@ -526,31 +526,24 @@ class GitRepository:
             await run_process(cmd)
         except subprocess.CalledProcessError as exc:
             # Hide the command used to avoid leaking the access token
-<<<<<<< HEAD
-            exc_chain = None if self._credentials else exc
-            stderr = (
-                redact_url_credentials(exc.stderr.decode().strip())
-                if exc.stderr
-                else ""
-            )
-            message = (
-                f"Failed to clone repository {self._url!r} with exit code {exc.returncode}"
-            )
-            if stderr:
-                message += f": {stderr}"
-            raise RuntimeError(message) from exc_chain
-=======
             parsed_url = urlparse(self._url)
             exc_chain = (
                 None
                 if self._credentials or parsed_url.password or parsed_url.username
                 else exc
             )
-            raise RuntimeError(
+            stderr = (
+                redact_url_credentials(exc.stderr.decode().strip())
+                if exc.stderr
+                else ""
+            )
+            message = (
                 f"Failed to clone repository {_strip_auth_from_url(self._url)!r} with exit code"
-                f" {exc.returncode}."
-            ) from exc_chain
->>>>>>> upstream/main
+                f" {exc.returncode}"
+            )
+            if stderr:
+                message += f": {stderr}"
+            raise RuntimeError(message) from exc_chain
 
         if self._commit_sha:
             # Fetch the commit
