@@ -23,6 +23,7 @@ from prefect._internal.concurrency.api import create_call, from_async
 from prefect.blocks.core import Block, BlockNotSavedError
 from prefect.blocks.system import Secret
 from prefect.filesystems import ReadableDeploymentStorage, WritableDeploymentStorage
+from prefect.locking.filesystem import FileSystemLockManager
 from prefect.logging.loggers import get_logger
 from prefect.utilities.collections import visit_collection
 from prefect.utilities.urls import redact_url_credentials
@@ -259,6 +260,37 @@ class GitRepository:
         except Exception:
             return False
 
+    async def _is_branch_up_to_date(self, branch_ref: str | None) -> bool:
+        """
+        Check if the local HEAD matches the remote branch without pulling.
+        """
+        cmd = ["git"]
+        cmd += self._git_config
+        remote_ref = f"origin/{branch_ref}" if branch_ref else "origin/HEAD"
+        fetch_cmd = cmd + ["fetch", "--depth", "1", "origin"]
+        if branch_ref:
+            fetch_cmd.append(branch_ref)
+        try:
+            await run_process(fetch_cmd, cwd=self.destination)
+            head = await run_process(
+                ["git", "rev-parse", "HEAD"], cwd=self.destination
+            )
+            remote = await run_process(
+                ["git", "rev-parse", remote_ref], cwd=self.destination
+            )
+            return head.stdout.decode().strip() == remote.stdout.decode().strip()
+        except Exception as exc:
+            self._logger.debug(
+                "Unable to compare local HEAD to %s for repository %s: %s",
+                remote_ref,
+                self._name,
+                exc,
+            )
+            return False
+
+    def _git_lock_key(self) -> str:
+        return f"prefect-git-pull-{self.destination.as_posix().strip('/').replace('/', '_')}"
+
     async def pull_code(self) -> None:
         """
         Pulls the contents of the configured repository to the local filesystem.
@@ -268,109 +300,127 @@ class GitRepository:
             self._name,
             self.destination,
         )
-
-        git_dir = self.destination / ".git"
-
-        if git_dir.exists():
-            # Check if the existing repository matches the configured repository
-            result = await run_process(
-                ["git", "config", "--get", "remote.origin.url"],
-                cwd=str(self.destination),
+        lock_manager = FileSystemLockManager(self.destination.parent)
+        lock_key = self._git_lock_key()
+        lock_holder = str(uuid4())
+        if not await lock_manager.aacquire_lock(lock_key, lock_holder):
+            raise RuntimeError(
+                f"Failed to acquire git lock for repository {self._name!r}."
             )
-            existing_repo_url = None
-            existing_repo_url = _strip_auth_from_url(result.stdout.decode().strip())
 
-            if existing_repo_url != self._url:
-                raise ValueError(
-                    f"The existing repository at {str(self.destination)} "
-                    f"does not match the configured repository {self._url}"
+        try:
+            git_dir = self.destination / ".git"
+
+            if git_dir.exists():
+                # Check if the existing repository matches the configured repository
+                result = await run_process(
+                    ["git", "config", "--get", "remote.origin.url"],
+                    cwd=str(self.destination),
                 )
+                existing_repo_url = None
+                existing_repo_url = _strip_auth_from_url(result.stdout.decode().strip())
 
-            # Sparsely checkout the repository if directories are specified and the repo is not in sparse-checkout mode already
-            if self._directories and not await self.is_sparsely_checked_out():
-                await run_process(
-                    ["git", "sparse-checkout", "set", *self._directories],
-                    cwd=self.destination,
-                )
+                if existing_repo_url != self._url:
+                    raise ValueError(
+                        f"The existing repository at {str(self.destination)} "
+                        f"does not match the configured repository {self._url}"
+                    )
 
-            self._logger.debug("Pulling latest changes from origin/%s", self._branch)
-            # Update the existing repository
-            cmd = ["git"]
-            # Add the git configuration, must be given after `git` and before the command
-            cmd += self._git_config
+                # Sparsely checkout the repository if directories are specified and the repo is not in sparse-checkout mode already
+                if self._directories and not await self.is_sparsely_checked_out():
+                    await run_process(
+                        ["git", "sparse-checkout", "set", *self._directories],
+                        cwd=self.destination,
+                    )
 
-            # If the commit is already checked out, skip the pull
-            if self._commit_sha and await self.is_current_commit():
-                return
+                self._logger.debug("Pulling latest changes from origin/%s", self._branch)
+                # Update the existing repository
+                cmd = ["git"]
+                # Add the git configuration, must be given after `git` and before the command
+                cmd += self._git_config
 
-            # If checking out a specific commit, fetch the latest changes and unshallow the repository if necessary
-            elif self._commit_sha:
-                if await self.is_shallow_clone():
-                    cmd += ["fetch", "origin", "--unshallow"]
+                # If the commit is already checked out, skip the pull
+                if self._commit_sha and await self.is_current_commit():
+                    return
+
+                # If checking out a specific commit, fetch the latest changes and unshallow the repository if necessary
+                elif self._commit_sha:
+                    if await self.is_shallow_clone():
+                        cmd += ["fetch", "origin", "--unshallow"]
+                    else:
+                        cmd += ["fetch", "origin", self._commit_sha]
+                    try:
+                        await run_process(cmd, cwd=self.destination)
+                        self._logger.debug("Successfully fetched latest changes")
+                    except subprocess.CalledProcessError as exc:
+                        stderr = (
+                            redact_url_credentials(exc.stderr.decode().strip())
+                            if exc.stderr
+                            else ""
+                        )
+                        message = (
+                            "Failed to fetch latest changes with exit code"
+                            f" {exc.returncode}"
+                        )
+                        if stderr:
+                            message += f": {stderr}"
+                        self._logger.error(message)
+                        try:
+                            #this rmtree sometimes fails if git failed catastrophically with no files moved
+                            shutil.rmtree(self.destination)
+                        except:
+                            pass
+                        await self._clone_repo()
+
+                    await run_process(
+                        ["git", "checkout", self._commit_sha],
+                        cwd=self.destination,
+                    )
+                    self._logger.debug(
+                        f"Successfully checked out commit {self._commit_sha}"
+                    )
+
+                # Otherwise, pull the latest changes from the branch
                 else:
-                    cmd += ["fetch", "origin", self._commit_sha]
-                try:
-                    await run_process(cmd, cwd=self.destination)
-                    self._logger.debug("Successfully fetched latest changes")
-                except subprocess.CalledProcessError as exc:
-                    stderr = (
-                        redact_url_credentials(exc.stderr.decode().strip())
-                        if exc.stderr
-                        else ""
-                    )
-                    message = (
-                        f"Failed to fetch latest changes with exit code {exc.returncode}"
-                    )
-                    if stderr:
-                        message += f": {stderr}"
-                    self._logger.error(message)
+                    if await self._is_branch_up_to_date(self._branch):
+                        self._logger.debug(
+                            "Repository %s already at latest commit for %s; skipping pull.",
+                            self._name,
+                            self._branch or "origin/HEAD",
+                        )
+                        return
+                    cmd += ["pull", "origin"]
+                    if self._branch:
+                        cmd += [self._branch]
+                    if self._include_submodules:
+                        cmd += ["--recurse-submodules"]
+                    cmd += ["--depth", "1"]
                     try:
-                        #this rmtree sometimes fails if git failed catastrophically with no files moved
-                        shutil.rmtree(self.destination)
-                    except:
-                        pass
-                    await self._clone_repo()
+                        await run_process(cmd, cwd=self.destination)
+                        self._logger.debug("Successfully pulled latest changes")
+                    except subprocess.CalledProcessError as exc:
+                        stderr = (
+                            redact_url_credentials(exc.stderr.decode().strip())
+                            if exc.stderr
+                            else ""
+                        )
+                        message = (
+                            f"Failed to pull latest changes with exit code {exc.returncode}"
+                        )
+                        if stderr:
+                            message += f": {stderr}"
+                        self._logger.error(message)
+                        try:
+                            #this rmtree sometimes fails if git failed catastrophically with no files moved
+                            shutil.rmtree(self.destination)
+                        except:
+                            pass
+                        await self._clone_repo()
 
-                await run_process(
-                    ["git", "checkout", self._commit_sha],
-                    cwd=self.destination,
-                )
-                self._logger.debug(
-                    f"Successfully checked out commit {self._commit_sha}"
-                )
-
-            # Otherwise, pull the latest changes from the branch
             else:
-                cmd += ["pull", "origin"]
-                if self._branch:
-                    cmd += [self._branch]
-                if self._include_submodules:
-                    cmd += ["--recurse-submodules"]
-                cmd += ["--depth", "1"]
-                try:
-                    await run_process(cmd, cwd=self.destination)
-                    self._logger.debug("Successfully pulled latest changes")
-                except subprocess.CalledProcessError as exc:
-                    stderr = (
-                        redact_url_credentials(exc.stderr.decode().strip())
-                        if exc.stderr
-                        else ""
-                    )
-                    message = (
-                        f"Failed to pull latest changes with exit code {exc.returncode}"
-                    )
-                    if stderr:
-                        message += f": {stderr}"
-                    self._logger.error(message)
-                    try:
-                        #this rmtree sometimes fails if git failed catastrophically with no files moved
-                        shutil.rmtree(self.destination)
-                    except:
-                        pass
-                    await self._clone_repo()
-
-        else:
-            await self._clone_repo()
+                await self._clone_repo()
+        finally:
+            lock_manager.release_lock(lock_key, lock_holder)
 
     async def _clone_repo(self):
         """
