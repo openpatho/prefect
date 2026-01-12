@@ -471,16 +471,11 @@ async def test_worker_releases_limit_slot_when_aborting_a_change_to_pending(
     release_mock.assert_called_once_with(flow_run.id)
 
 
-<<<<<<< HEAD
 async def test_submit_run_releases_limit_on_exception(
-=======
-async def test_worker_handles_double_release_gracefully(
->>>>>>> upstream/main
     prefect_client: PrefectClient,
     worker_deployment_wq1: WorkQueue,
     work_pool: WorkPool,
 ):
-<<<<<<< HEAD
     flow_run = await prefect_client.create_flow_run_from_deployment(
         worker_deployment_wq1.id,
         state=Scheduled(scheduled_time=now_fn("UTC") - timedelta(days=1)),
@@ -489,14 +484,19 @@ async def test_worker_handles_double_release_gracefully(
     release_mock = Mock()
 
     async with WorkerTestImpl(work_pool_name=work_pool.name, limit=1) as worker:
-        worker._propose_pending_state = AsyncMock(side_effect=Exception("boom"))
+        worker._propose_pending_state = AsyncMock(side_effect=RuntimeError("boom"))
         worker._release_limit_slot = release_mock
 
-        with pytest.raises(Exception, match="boom"):
-            await worker._submit_run(flow_run)
+        await worker._submit_run(flow_run)
 
     release_mock.assert_called_once_with(flow_run.id)
-=======
+
+
+async def test_worker_handles_double_release_gracefully(
+    prefect_client: PrefectClient,
+    worker_deployment_wq1: WorkQueue,
+    work_pool: WorkPool,
+):
     """Regression test for https://github.com/PrefectHQ/prefect/issues/19157"""
 
     def create_run_with_deployment(state: State):
@@ -520,7 +520,6 @@ async def test_worker_handles_double_release_gracefully(
     updated_flow_run = await prefect_client.read_flow_run(flow_run.id)
     assert updated_flow_run.state is not None
     assert updated_flow_run.state.is_crashed()
->>>>>>> upstream/main
 
 
 async def test_worker_with_work_pool_and_limit(

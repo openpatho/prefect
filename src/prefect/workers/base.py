@@ -1307,41 +1307,8 @@ class BaseWorker(abc.ABC, Generic[C, V, R]):
         """
         run_logger = self.get_flow_run_logger(flow_run)
 
-<<<<<<< HEAD
         try:
             if flow_run.deployment_id:
-=======
-        if flow_run.deployment_id:
-            try:
-                await self.client.read_deployment(flow_run.deployment_id)
-            except ObjectNotFound:
-                self._logger.exception(
-                    f"Deployment {flow_run.deployment_id} no longer exists. "
-                    f"Flow run {flow_run.id} will not be submitted for"
-                    " execution"
-                )
-                self._submitting_flow_run_ids.remove(flow_run.id)
-                if self._cancelling_observer is not None:
-                    self._cancelling_observer.remove_in_flight_flow_run_id(flow_run.id)
-                await self._mark_flow_run_as_cancelled(
-                    flow_run,
-                    state_updates=dict(
-                        message=f"Deployment {flow_run.deployment_id} no longer exists, cancelled run."
-                    ),
-                )
-                return
-
-        ready_to_submit = await self._propose_pending_state(flow_run)
-        self._logger.debug(f"Ready to submit {flow_run.id}: {ready_to_submit}")
-        if ready_to_submit:
-            if TYPE_CHECKING:
-                assert self._runs_task_group is not None
-            readiness_result = await self._runs_task_group.start(
-                self._submit_run_and_capture_errors, flow_run
-            )
-
-            if readiness_result and not isinstance(readiness_result, Exception):
->>>>>>> upstream/main
                 try:
                     await self.client.read_deployment(flow_run.deployment_id)
                 except ObjectNotFound:
@@ -1350,7 +1317,7 @@ class BaseWorker(abc.ABC, Generic[C, V, R]):
                         f"Flow run {flow_run.id} will not be submitted for"
                         " execution"
                     )
-                    self._submitting_flow_run_ids.remove(flow_run.id)
+                    self._release_limit_slot(flow_run.id)
                     await self._mark_flow_run_as_cancelled(
                         flow_run,
                         state_updates=dict(
@@ -1393,14 +1360,10 @@ class BaseWorker(abc.ABC, Generic[C, V, R]):
                 f"An error occurred while submitting flow run '{flow_run.id}'"
             )
             self._release_limit_slot(flow_run.id)
-<<<<<<< HEAD
         finally:
             self._submitting_flow_run_ids.discard(flow_run.id)
-=======
-        self._submitting_flow_run_ids.remove(flow_run.id)
-        if self._cancelling_observer is not None:
-            self._cancelling_observer.remove_in_flight_flow_run_id(flow_run.id)
->>>>>>> upstream/main
+            if self._cancelling_observer is not None:
+                self._cancelling_observer.remove_in_flight_flow_run_id(flow_run.id)
 
     async def _submit_run_and_capture_errors(
         self,
