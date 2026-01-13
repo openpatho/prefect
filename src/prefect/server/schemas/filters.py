@@ -1464,8 +1464,13 @@ class LogFilterTextSearch(PrefectFilterBaseModel):
 
         parsed = parse_text_search_query(self.query)
 
-        # Build combined searchable text field (message + name)
-        searchable_field = sa.func.concat(db.Log.message, " ", db.Log.name)
+        # Build combined searchable text field (message + name) in a way that
+        # works across dialects (SQLite lacks concat()) and is NULL-safe.
+        searchable_field = (
+            sa.func.coalesce(db.Log.message, "")
+            + sa.literal(" ")
+            + sa.func.coalesce(db.Log.name, "")
+        )
 
         # Handle include terms (OR logic)
         if parsed.include:
