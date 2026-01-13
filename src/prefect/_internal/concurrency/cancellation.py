@@ -564,23 +564,22 @@ def cancel_sync_after(timeout: Optional[float], name: Optional[str] = None):
     """
 
     if sys.platform.startswith("win"):
-        yield NullCancelScope(reason="cancellation is not supported on Windows")
-        return
-
-    thread = threading.current_thread()
-    existing_alarm_handler = signal.getsignal(signal.SIGALRM) != signal.SIG_DFL
-
-    if (
-        thread is threading.main_thread()
-        # Avoid nested alarm handlers; it's hard to follow and they will interfere with
-        # each other
-        and not existing_alarm_handler
-        # Avoid using an alarm when there is no timeout; it's better saved for that case
-        and timeout is not None
-    ):
-        scope = AlarmCancelScope(name=name, timeout=timeout)
-    else:
         scope = WatcherThreadCancelScope(name=name, timeout=timeout)
+    else:
+        thread = threading.current_thread()
+        existing_alarm_handler = signal.getsignal(signal.SIGALRM) != signal.SIG_DFL
+
+        if (
+            thread is threading.main_thread()
+            # Avoid nested alarm handlers; it's hard to follow and they will interfere with
+            # each other
+            and not existing_alarm_handler
+            # Avoid using an alarm when there is no timeout; it's better saved for that case
+            and timeout is not None
+        ):
+            scope = AlarmCancelScope(name=name, timeout=timeout)
+        else:
+            scope = WatcherThreadCancelScope(name=name, timeout=timeout)
 
     with scope:
         yield scope
