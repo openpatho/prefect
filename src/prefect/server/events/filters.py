@@ -719,9 +719,16 @@ class EventTextFilter(EventDataFilter):
         resource_field = sa.cast(db.Event.resource, sa.Text)
         related_field = sa.cast(db.Event.related, sa.Text)
 
-        # Combine all searchable fields
-        searchable_field = sa.func.concat(
-            event_field, " ", resource_field, " ", related_field, " ", payload_field
+        # Combine all searchable fields in a way that works across dialects (SQLite
+        # lacks a concat() function) and is resilient to NULLs.
+        searchable_field = (
+            sa.func.coalesce(event_field, "")
+            + sa.literal(" ")
+            + sa.func.coalesce(resource_field, "")
+            + sa.literal(" ")
+            + sa.func.coalesce(related_field, "")
+            + sa.literal(" ")
+            + sa.func.coalesce(payload_field, "")
         )
 
         # Handle include terms (OR logic)
