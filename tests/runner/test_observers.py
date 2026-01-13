@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from prefect.runner._observers import FlowRunCancellingObserver
 
@@ -10,7 +11,7 @@ class _RaisingSubscriber:
         return self
 
     async def __anext__(self):
-        raise ConnectionClosedError(1000, "closed")
+        raise ConnectionClosedError(Close(1000, "closed"), None)
 
 
 async def test_observer_handles_connection_closed_error():
@@ -19,4 +20,3 @@ async def test_observer_handles_connection_closed_error():
 
     # Should complete without raising
     await observer._consume_events()
-

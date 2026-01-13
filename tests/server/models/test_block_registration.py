@@ -18,13 +18,16 @@ from prefect.utilities.dispatch import get_registry_for_type
 async def expected_number_of_registered_block_types():
     collections_blocks_data = await _load_collection_blocks_data()
 
-    block_types_from_collections = [
-        block_type
+    collection_block_slugs = {
+        block_type["slug"]
         for collection in collections_blocks_data["collections"].values()
         for block_type in collection["block_types"].values()
-    ]
+    }
     block_registry = get_registry_for_type(Block) or {}
-    return len(block_types_from_collections) + len(block_registry.values())
+    registry_block_slugs = {
+        block_class.get_block_type_slug() for block_class in block_registry.values()
+    }
+    return len(collection_block_slugs | registry_block_slugs)
 
 
 class TestRunAutoRegistration:
