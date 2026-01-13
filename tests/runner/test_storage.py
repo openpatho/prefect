@@ -30,6 +30,12 @@ def tmp_cwd(monkeypatch, tmp_path):
     monkeypatch.chdir(str(tmp_path))
 
 
+def _run_process_result(stdout: str = "") -> MagicMock:
+    result_mock = MagicMock()
+    result_mock.stdout = stdout.encode()
+    return result_mock
+
+
 class TestCreateStorageFromSource:
     @pytest.mark.parametrize(
         "url, expected_type",
@@ -297,6 +303,15 @@ class TestGitRepository:
     ):
         # pretend the repo already exists
         monkeypatch.setattr("pathlib.Path.exists", lambda x: ".git" in str(x))
+        mock_run_process.side_effect = [
+            _run_process_result("https://github.com/org/repo.git"),
+            _run_process_result("false"),
+            _run_process_result(),
+            _run_process_result(),
+            _run_process_result("head-sha"),
+            _run_process_result("remote-sha"),
+            _run_process_result(),
+        ]
 
         repo = GitRepository(
             url="https://github.com/org/repo.git",
@@ -317,6 +332,18 @@ class TestGitRepository:
             ),
             call(
                 ["git", "sparse-checkout", "set", "dir_1", "dir_2"],
+                cwd=Path.cwd() / "repo",
+            ),
+            call(
+                ["git", "fetch", "--depth", "1", "origin"],
+                cwd=Path.cwd() / "repo",
+            ),
+            call(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path.cwd() / "repo",
+            ),
+            call(
+                ["git", "rev-parse", "origin/HEAD"],
                 cwd=Path.cwd() / "repo",
             ),
             call(["git", "pull", "origin", "--depth", "1"], cwd=Path.cwd() / "repo"),
@@ -378,7 +405,7 @@ class TestGitRepository:
             url="https://github.com/org/repo.git", include_submodules=True
         )
         await repo.pull_code()
-        mock_run_process.assert_awaited_with(
+        mock_run_process.assert_awaited_once_with(
             [
                 "git",
                 "clone",
@@ -392,19 +419,47 @@ class TestGitRepository:
 
         # pretend the repo already exists
         monkeypatch.setattr("pathlib.Path.exists", lambda x: ".git" in str(x))
+        mock_run_process.reset_mock()
+        mock_run_process.side_effect = [
+            _run_process_result("https://github.com/org/repo.git"),
+            _run_process_result(),
+            _run_process_result("head-sha"),
+            _run_process_result("remote-sha"),
+            _run_process_result(),
+        ]
 
         await repo.pull_code()
-        mock_run_process.assert_awaited_with(
-            [
-                "git",
-                "pull",
-                "origin",
-                "--recurse-submodules",
-                "--depth",
-                "1",
-            ],
-            cwd=Path.cwd() / "repo",
-        )
+        expected_calls = [
+            call(
+                ["git", "config", "--get", "remote.origin.url"],
+                cwd=str(Path.cwd() / "repo"),
+            ),
+            call(
+                ["git", "fetch", "--depth", "1", "origin"],
+                cwd=Path.cwd() / "repo",
+            ),
+            call(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path.cwd() / "repo",
+            ),
+            call(
+                ["git", "rev-parse", "origin/HEAD"],
+                cwd=Path.cwd() / "repo",
+            ),
+            call(
+                [
+                    "git",
+                    "pull",
+                    "origin",
+                    "--recurse-submodules",
+                    "--depth",
+                    "1",
+                ],
+                cwd=Path.cwd() / "repo",
+            ),
+        ]
+        mock_run_process.assert_has_awaits(expected_calls)
+        assert mock_run_process.await_args_list == expected_calls
 
     async def test_include_submodules_with_credentials(
         self, mock_run_process: AsyncMock, monkeypatch
@@ -1089,7 +1144,15 @@ class TestGitRepository:
             stderr=b"fatal: https://oauth2:secret@github.com/org/repo.git",
         )
 
-        run_process_mock = AsyncMock(side_effect=[success, error])
+        run_process_mock = AsyncMock(
+            side_effect=[
+                success,
+                _run_process_result(),
+                _run_process_result("head-sha"),
+                _run_process_result("remote-sha"),
+                error,
+            ]
+        )
         monkeypatch.setattr("prefect.runner.storage.run_process", run_process_mock)
         clone_mock = AsyncMock()
         monkeypatch.setattr(GitRepository, "_clone_repo", clone_mock)
