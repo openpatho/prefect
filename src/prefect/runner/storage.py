@@ -450,7 +450,7 @@ class GitRepository:
                 # Otherwise, pull the latest changes from the branch
                 else:
                     if await self._is_branch_up_to_date(self._branch):
-                        self._logger.debug(
+                        self._logger.info(
                             "Repository %s already at latest commit for %s; skipping pull.",
                             self._name,
                             self._branch or "origin/HEAD",
@@ -464,7 +464,7 @@ class GitRepository:
                     cmd += ["--depth", "1"]
                     try:
                         await run_process(cmd, cwd=self.destination)
-                        self._logger.debug("Successfully pulled latest changes")
+                        self._logger.info("Successfully pulled latest changes")
                     except subprocess.CalledProcessError as exc:
                         stderr = (
                             redact_url_credentials(exc.stderr.decode().strip())
