@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import shutil
 import subprocess
 from copy import deepcopy
@@ -16,14 +17,13 @@ from urllib.parse import urlparse, urlsplit, urlunparse
 from uuid import uuid4
 
 import fsspec  # pyright: ignore[reportMissingTypeStubs]
-from anyio import run_process
+from anyio import run_process, to_thread
 from pydantic import SecretStr
 
 from prefect._internal.concurrency.api import create_call, from_async
 from prefect.blocks.core import Block, BlockNotSavedError
 from prefect.blocks.system import Secret
 from prefect.filesystems import ReadableDeploymentStorage, WritableDeploymentStorage
-from prefect.locking.filesystem import FileSystemLockManager
 from prefect.logging.loggers import get_logger
 from prefect.utilities.collections import visit_collection
 from prefect.utilities.urls import redact_url_credentials
@@ -288,8 +288,9 @@ class GitRepository:
             )
             return False
 
-    def _git_lock_key(self) -> str:
-        return f"prefect-git-pull-{self.destination.as_posix().strip('/').replace('/', '_')}"
+    def _git_lock_path(self) -> Path:
+        sanitized = self.destination.as_posix().strip("/").replace("/", "_")
+        return Path("/tmp") / f"prefect-git-pull-{sanitized}.lock"
 
     async def pull_code(self) -> None:
         """
@@ -300,13 +301,14 @@ class GitRepository:
             self._name,
             self.destination,
         )
-        lock_manager = FileSystemLockManager(self.destination.parent)
-        lock_key = self._git_lock_key()
-        lock_holder = str(uuid4())
-        if not await lock_manager.aacquire_lock(lock_key, lock_holder):
-            raise RuntimeError(
-                f"Failed to acquire git lock for repository {self._name!r}."
-            )
+        lock_path = self._git_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_path.open("a+")
+        try:
+            await to_thread.run_sync(fcntl.flock, lock_file, fcntl.LOCK_EX)
+        except Exception:
+            lock_file.close()
+            raise
 
         try:
             git_dir = self.destination / ".git"
@@ -420,7 +422,10 @@ class GitRepository:
             else:
                 await self._clone_repo()
         finally:
-            lock_manager.release_lock(lock_key, lock_holder)
+            try:
+                await to_thread.run_sync(fcntl.flock, lock_file, fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
 
     async def _clone_repo(self):
         """
