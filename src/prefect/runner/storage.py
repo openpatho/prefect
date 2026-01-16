@@ -24,8 +24,9 @@ from pydantic import SecretStr
 from prefect._internal.concurrency.api import create_call, from_async
 from prefect.blocks.core import Block, BlockNotSavedError
 from prefect.blocks.system import Secret
+from prefect.exceptions import MissingContextError
 from prefect.filesystems import ReadableDeploymentStorage, WritableDeploymentStorage
-from prefect.logging.loggers import get_logger
+from prefect.logging.loggers import get_logger, get_run_logger
 from prefect.utilities.collections import visit_collection
 from prefect.utilities.urls import redact_url_credentials
 
@@ -192,6 +193,14 @@ class GitRepository:
         self._pull_interval = pull_interval
         self._directories = directories
 
+    def _get_logger(self):
+        try:
+            run_logger = get_run_logger()
+        except MissingContextError:
+            return self._logger
+
+        return run_logger.getChild(f"runner.storage.git-repository.{self._name}")
+
     @property
     def destination(self) -> Path:
         return self._storage_base_path / self._name
@@ -332,6 +341,7 @@ class GitRepository:
         """
         Check if the local HEAD matches the remote branch without pulling.
         """
+        logger = self._get_logger()
         cmd = ["git"]
         cmd += self._git_config
         remote_ref = f"origin/{branch_ref}" if branch_ref else "origin/HEAD"
@@ -348,7 +358,7 @@ class GitRepository:
             )
             return head.stdout.decode().strip() == remote.stdout.decode().strip()
         except Exception as exc:
-            self._logger.debug(
+            logger.debug(
                 "Unable to compare local HEAD to %s for repository %s: %s",
                 remote_ref,
                 self._name,
@@ -366,7 +376,8 @@ class GitRepository:
         """
         Pulls the contents of the configured repository to the local filesystem.
         """
-        self._logger.debug(
+        logger = self._get_logger()
+        logger.debug(
             "Pulling contents from repository '%s' to '%s'...",
             self._name,
             self.destination,
@@ -408,7 +419,7 @@ class GitRepository:
                         cwd=self.destination,
                     )
 
-                self._logger.debug("Pulling latest changes from origin/%s", self._branch)
+                logger.debug("Pulling latest changes from origin/%s", self._branch)
                 # Update the existing repository
                 cmd = ["git"]
                 # Add the git configuration, must be given after `git` and before the command
@@ -426,7 +437,7 @@ class GitRepository:
                         cmd += ["fetch", "origin", self._commit_sha]
                     try:
                         await run_process(cmd, cwd=self.destination)
-                        self._logger.debug("Successfully fetched latest changes")
+                        logger.debug("Successfully fetched latest changes")
                     except subprocess.CalledProcessError as exc:
                         stderr = (
                             redact_url_credentials(exc.stderr.decode().strip())
@@ -439,7 +450,7 @@ class GitRepository:
                         )
                         if stderr:
                             message += f": {stderr}"
-                        self._logger.error(message)
+                        logger.error(message)
                         try:
                             #this rmtree sometimes fails if git failed catastrophically with no files moved
                             shutil.rmtree(self.destination)
@@ -451,14 +462,14 @@ class GitRepository:
                         ["git", "checkout", self._commit_sha],
                         cwd=self.destination,
                     )
-                    self._logger.debug(
+                    logger.debug(
                         f"Successfully checked out commit {self._commit_sha}"
                     )
 
                 # Otherwise, pull the latest changes from the branch
                 else:
                     if await self._is_branch_up_to_date(self._branch):
-                        self._logger.info(
+                        logger.info(
                             "Repository %s already at latest commit for %s; skipping pull.",
                             self._name,
                             self._branch or "origin/HEAD",
@@ -472,7 +483,7 @@ class GitRepository:
                     cmd += ["--depth", "1"]
                     try:
                         await run_process(cmd, cwd=self.destination)
-                        self._logger.info("Successfully pulled latest changes")
+                        logger.info("Successfully pulled latest changes")
                     except subprocess.CalledProcessError as exc:
                         stderr = (
                             redact_url_credentials(exc.stderr.decode().strip())
@@ -484,7 +495,7 @@ class GitRepository:
                         )
                         if stderr:
                             message += f": {stderr}"
-                        self._logger.error(message)
+                        logger.error(message)
                         try:
                             #this rmtree sometimes fails if git failed catastrophically with no files moved
                             shutil.rmtree(self.destination)
@@ -506,7 +517,8 @@ class GitRepository:
         """
         Clones the repository into the local destination.
         """
-        self._logger.debug("Cloning repository %s", self._url)
+        logger = self._get_logger()
+        logger.debug("Cloning repository %s", self._url)
 
         repository_url = self._repository_url_with_credentials
         cmd = ["git"]
@@ -569,11 +581,11 @@ class GitRepository:
                 ["git", "checkout", self._commit_sha],
                 cwd=self.destination,
             )
-            self._logger.debug(f"Successfully checked out commit {self._commit_sha}")
+            logger.debug(f"Successfully checked out commit {self._commit_sha}")
 
         # Once repository is cloned and the repo is in sparse-checkout mode then grow the working directory
         if self._directories:
-            self._logger.debug("Will add %s", self._directories)
+            logger.debug("Will add %s", self._directories)
             await run_process(
                 ["git", "sparse-checkout", "set", *self._directories],
                 cwd=self.destination,
